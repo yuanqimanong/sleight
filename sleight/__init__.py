@@ -28,6 +28,7 @@ from .core.errors import (
     SleightError,
 )
 from .core.human import CAREFUL, DEFAULT, FAST, HumanProfile
+from .core.resources import NetworkResource
 from .core.session import Selectable, Session
 from .core.transport import Transport
 from .core.types import (
@@ -59,6 +60,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "Session",
     "Selectable",
     "Element",
+    "NetworkResource",
     "Transport",
     "enable_debug_logging",
     # 拟人预设

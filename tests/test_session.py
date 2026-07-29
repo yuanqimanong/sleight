@@ -363,6 +363,137 @@ def test_a_new_navigation_resets_the_in_flight_set():
 
 
 # --------------------------------------------------------------------------- #
+# 事件观察者与资源监听
+# --------------------------------------------------------------------------- #
+
+
+def test_observers_do_not_have_to_monkeypatch_the_private_handler():
+    seen: list[str] = []
+    s, t = build()
+    with s.observe_events(lambda ev: seen.append(ev.method)):
+        t.emit("Page.lifecycleEvent", {"name": "load", "loaderId": "L1"})
+        s.drain()
+    assert seen == ["Page.lifecycleEvent"]
+
+
+def test_observers_are_removed_on_exit():
+    seen: list[str] = []
+    s, t = build()
+    with s.observe_events(lambda ev: seen.append(ev.method)):
+        pass
+    t.emit("Network.requestWillBeSent", {"requestId": "1"})
+    s.drain()
+    assert seen == []
+
+
+def test_the_sessions_own_state_machine_still_runs_alongside_observers():
+    """观察者不能顶掉导航纪元和网络空闲 —— 那会让 wait() 永远超时。"""
+    s, t = build()
+    navigating(t, "L1")
+    with s.observe_events(lambda ev: None):
+        t.on_pump = lambda tr: tr.lifecycle("DOMContentLoaded", "L1")
+        s.open("https://example.com", timeout=2)
+
+
+def test_a_raising_observer_does_not_break_the_event_stream():
+    """一个坏回调不该把整个会话搞停。"""
+    good: list[str] = []
+    s, t = build()
+
+    def boom(ev):
+        raise RuntimeError("observer is broken")
+
+    with s.observe_events(boom), s.observe_events(lambda ev: good.append(ev.method)):
+        t.emit("Network.requestWillBeSent", {"requestId": "1"})
+        s.drain()
+    assert good == ["Network.requestWillBeSent"]
+
+
+def test_capture_resources_collects_and_notifies():
+    s, t = build()
+    announced: list[str] = []
+
+    with s.capture_resources(
+        types={"Script", "Stylesheet"}, on_discovered=lambda r: announced.append(r.url)
+    ) as capture:
+        t.emit("Network.requestWillBeSent",
+               {"requestId": "1", "type": "Script", "request": {"url": "https://x/a.js"}})
+        t.emit("Network.requestWillBeSent",
+               {"requestId": "2", "type": "Image", "request": {"url": "https://x/a.png"}})
+        t.emit("Network.requestWillBeSent",
+               {"requestId": "3", "request": {"url": "https://x/a.css"}})
+        t.emit("Network.responseReceived",
+               {"requestId": "3", "type": "Stylesheet",
+                "response": {"status": 200, "mimeType": "text/css"}})
+        s.drain()
+
+        assert announced == ["https://x/a.js", "https://x/a.css"]
+
+    # 退出上下文之后 tracker 还能查
+    assert capture.urls("Script") == ["https://x/a.js"]
+    assert sorted(capture.by_type()) == ["Script", "Stylesheet"]
+
+
+def test_capture_stops_at_the_end_of_the_block():
+    s, t = build()
+    with s.capture_resources() as capture:
+        pass
+    t.emit("Network.requestWillBeSent",
+           {"requestId": "1", "type": "Script", "request": {"url": "https://x/late.js"}})
+    s.drain()
+    assert capture.snapshot() == []
+
+
+def test_capture_needs_the_network_domain():
+    """track_network=False 时静默抓不到东西比报错难查得多。"""
+    s, _ = build(track_network=False)
+    with pytest.raises(SleightError, match="track_network"), s.capture_resources():
+        pass
+
+
+def test_capture_rejects_a_misspelled_type():
+    s, _ = build()
+    with pytest.raises(ValueError, match="StyleSheet"), s.capture_resources(types={"StyleSheet"}):
+        pass
+
+
+def test_two_captures_can_run_at_once():
+    """两套筛选条件互不干扰 —— 观察者是列表，不是单个补丁。"""
+    s, t = build()
+    with s.capture_resources(types={"Script"}) as js,          s.capture_resources(types={"Image"}) as img:
+        t.emit("Network.requestWillBeSent",
+               {"requestId": "1", "type": "Script", "request": {"url": "https://x/a.js"}})
+        t.emit("Network.requestWillBeSent",
+               {"requestId": "2", "type": "Image", "request": {"url": "https://x/a.png"}})
+        s.drain()
+    assert js.urls() == ["https://x/a.js"]
+    assert img.urls() == ["https://x/a.png"]
+
+
+def test_pump_events_drains_for_the_requested_duration():
+    s, t = build()
+    collected: list[str] = []
+
+    def deliver(tr):
+        tr.emit("Network.requestWillBeSent",
+                {"requestId": str(len(collected)), "type": "Script",
+                 "request": {"url": f"https://x/{len(collected)}.js"}})
+
+    t.on_pump = deliver
+    with s.capture_resources(types={"Script"}, on_discovered=lambda r: collected.append(r.url)):
+        s.pump_events(0.2, tick=0.01)
+    assert collected, "0.2 秒内应该收到事件"
+    assert t.pumps > 1
+
+
+def test_pump_events_with_no_duration_is_a_noop():
+    s, t = build()
+    s.pump_events(0)
+    s.pump_events(-1)
+    assert t.pumps == 0
+
+
+# --------------------------------------------------------------------------- #
 # 读取
 # --------------------------------------------------------------------------- #
 

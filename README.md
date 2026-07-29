@@ -37,6 +37,18 @@ with mgr.lease() as inst:                    # exclusive lease, released on exit
         s.click("#submit", human=False)      # …except this one, speed matters here
 ```
 
+See what the page actually loaded — the library gives you structured data, you decide
+what to print:
+
+```python
+with s.capture_resources(types={"Script", "Stylesheet"}) as capture:
+    s.open(url, wait=Load())
+    s.pump_events(10)          # the async batch that arrives after `load`
+
+for r in capture.snapshot():
+    print(r.resource_type, r.status, r.url)
+```
+
 Target one specific profile — by id, by name, or by tag:
 
 ```python
@@ -113,8 +125,9 @@ variable).
 ## Scope
 
 **Does:** navigation and typed wait conditions · rendered-DOM reads · CSS queries ·
-human mouse / keyboard / wheel · instance discovery across providers · cooperative
-exclusive leasing with TTL renewal · idempotent recovery.
+human mouse / keyboard / wheel · structured network-resource capture · instance
+discovery across providers · cooperative exclusive leasing with TTL renewal ·
+idempotent recovery.
 
 **Does not:** data extraction · scheduling and queues · fingerprint spoofing (that is
 the browser's job) · iframe / OOPIF / Shadow DOM piercing · strict fencing · WebDriver

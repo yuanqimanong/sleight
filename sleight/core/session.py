@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable, Iterable, Iterator
 from random import Random
 from typing import Any
 
@@ -25,12 +27,13 @@ from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
 from .protocol import Event
+from .resources import DedupeKey, NetworkResource, ResourceTracker
 from .transport import Transport
 from .types import Box, Condition, DomReady, Point
 
 log = logging.getLogger("sleight.session")
 
-__all__ = ["Selectable", "Session"]
+__all__ = ["NetworkResource", "Selectable", "Session"]
 
 _POLL_MIN = 0.10
 _POLL_MAX = 0.25
@@ -87,6 +90,10 @@ class Session:
         self._frame_id: str | None = None
         self._lifecycle: set[str] = set()
         self._netidle = NetworkIdleTracker()
+        self._track_network = track_network
+        # 事件观察者。有了它就不必去 monkeypatch _handle —— 那是私有方法，而且补丁
+        # 之间会互相覆盖
+        self._observers: list[Callable[[Event], None]] = []
 
         self._t.call("Page.enable", session_id=self._sid)
         self._t.call("Runtime.enable", session_id=self._sid)
@@ -206,6 +213,13 @@ class Session:
         elif ev.method.startswith("Network."):
             self._netidle.feed(ev)
 
+        for observe in self._observers:
+            # 一个观察者抛异常不该把整条事件流搞停 —— 后面还有等待条件要靠它推进
+            try:
+                observe(ev)
+            except Exception:
+                log.warning("event observer %r raised; continuing", observe, exc_info=True)
+
     def _pump(self, timeout: float = _PUMP_SLICE) -> None:
         self._t.pump(timeout=timeout)
         self.drain()
@@ -316,6 +330,108 @@ class Session:
 
     def _count(self, selector: str) -> int:
         return int(self.eval(f"document.querySelectorAll({json.dumps(selector)}).length") or 0)
+
+    # ------------------------------------------------------------------ #
+    # 事件与资源监听
+    # ------------------------------------------------------------------ #
+
+    @contextlib.contextmanager
+    def observe_events(
+        self, callback: Callable[[Event], None]
+    ) -> Iterator[Callable[[Event], None]]:
+        """临时挂一个原始 CDP 事件观察者。
+
+        低层逃生舱 —— sleight 没建模的事件从这里拿。多数场景更该用
+        :meth:`capture_resources`。
+
+        观察者在 Session 自己的状态机（导航纪元、网络空闲）**之后**被调用，只收本会话
+        的事件。它抛异常只会记一条 warning，不会打断事件流。
+
+            >>> with session.observe_events(lambda ev: print(ev.method)):
+            ...     session.open("https://example.com")
+
+        :param callback: 收 :class:`~sleight.core.protocol.Event` 的可调用对象
+        :returns: 上下文管理器，产出 ``callback`` 本身；退出时自动摘掉
+        """
+        self._observers.append(callback)
+        try:
+            yield callback
+        finally:
+            with contextlib.suppress(ValueError):
+                self._observers.remove(callback)
+
+    @contextlib.contextmanager
+    def capture_resources(
+        self,
+        *,
+        types: Iterable[str] | None = None,
+        predicate: Callable[[NetworkResource], bool] | None = None,
+        dedupe_by: DedupeKey | None = "url",
+        on_discovered: Callable[[NetworkResource], None] | None = None,
+    ) -> Iterator[ResourceTracker]:
+        """收集页面加载过程中的网络资源。
+
+        **库只负责给出结构化数据，筛选和输出格式是调用方的事** —— 所以这里没有任何
+        打印，要看什么自己在 ``on_discovered`` 里写。
+
+            >>> def show(r):
+            ...     print(r.resource_type, r.url)
+            >>> with session.capture_resources(
+            ...     types={"Script", "Stylesheet"}, on_discovered=show
+            ... ) as capture:
+            ...     session.open(url, wait=Load())
+            ...     session.pump_events(10)          # 等异步加载的那批
+            >>> capture.urls("Script")
+            [...]
+
+        资源的分类可能到**响应回来**才确定（``requestWillBeSent`` 上的 ``type``
+        经常缺失），所以 ``on_discovered`` 的时机是"首次满足筛选条件"，不是"首次
+        看见"。
+
+        看不到 attach 之前就已经发起的请求 —— 和
+        :class:`~sleight.core.types.NetworkIdle` 是同一个语义边界。
+
+        :param types: 只要这些 CDP ``ResourceType``（``Script`` / ``Stylesheet`` /
+            ``XHR`` / ``Fetch`` / ``Image`` / ``Font`` / ``Document`` …）。``None`` = 全要
+        :param predicate: 额外的自定义谓词，与 ``types`` 是**与**关系。
+            例如 ``lambda r: r.status == 200``
+        :param dedupe_by: ``"url"`` 每个地址只报一次（默认）；``"request_id"`` 每条
+            请求一次；``None`` 不去重
+        :param on_discovered: 首次匹配时的回调
+        :returns: 上下文管理器，产出 :class:`~sleight.core.resources.ResourceTracker`。
+            退出后 tracker 仍然可以 :meth:`~sleight.core.resources.ResourceTracker.snapshot`
+        :raises ValueError: ``types`` 里有不认识的 ResourceType（拼错大小写的后果是
+            静默抓不到东西，所以宁可直接报错）
+        :raises SleightError: 本会话构造时 ``track_network=False``，没开 Network domain
+        """
+        if not self._track_network:
+            raise SleightError(
+                "capture_resources() needs the Network domain; this session was created "
+                "with track_network=False"
+            )
+        tracker = ResourceTracker(
+            types=frozenset(types) if types is not None else None,
+            predicate=predicate,
+            dedupe_by=dedupe_by,
+            on_discovered=on_discovered,
+        )
+        with self.observe_events(tracker.feed):
+            yield tracker
+
+    def pump_events(self, duration: float, *, tick: float = 0.25) -> None:
+        """原地收事件收 ``duration`` 秒，不判断任何条件。
+
+        给"页面 load 完了，但还有一批 JS 在异步拉资源"这种场景用 —— 想等的是一段
+        时间，不是一个条件。有明确条件时用 :meth:`wait`，别在这里睡固定时长。
+
+        :param duration: 收多久，秒。``<= 0`` 直接返回
+        :param tick: 单次 ``recv`` 的阻塞上限，秒。调小了响应更及时，也更占 CPU
+        """
+        if duration <= 0:
+            return
+        deadline = time.monotonic() + duration
+        while (remaining := deadline - time.monotonic()) > 0:
+            self._pump(timeout=min(tick, remaining))
 
     # ------------------------------------------------------------------ #
     # 读取
