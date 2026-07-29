@@ -7,6 +7,7 @@ Pool 是**唯一**的实例选择者，并且**全生命周期持有同一个 Le
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
@@ -299,7 +300,12 @@ class Pool:
         self._lease: Lease = lease if lease is not None else MemoryLease()
 
         self._cache: list[InstanceInfo] = []
-        self._cache_at = 0.0
+        # **不能用 0.0 当"还没拉过"的哨兵。** time.monotonic() 在 Linux 上是**开机以来**
+        # 的秒数：刚起来的容器 / CI runner 上它可能只有 20，于是 discover() 里
+        # `now - 0.0 < discovery_ttl` 成立，第一次调用就直接返回空缓存、provider 一次
+        # 都不会被问到 —— 表现是进程启动后的头一分钟内 lease() 找不到任何实例。
+        # 开发机开机久了永远碰不到，CI 上必现。
+        self._cache_at = -math.inf
         self._cache_lock = threading.Lock()
         self._failures: dict[str, tuple[int, float]] = {}     # name -> (次数, 下次可试时间)
         self._cursor = count()

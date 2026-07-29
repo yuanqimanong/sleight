@@ -7,6 +7,7 @@ import time
 import pytest
 
 from sleight import Pool
+from sleight import pool as pool_module
 from sleight.core.errors import ConnectionError, NotFound
 
 from .conftest import FakeProvider
@@ -26,6 +27,27 @@ def test_discovery_is_cached():
     assert p.list_calls == 1
     pool.discover(force=True)
     assert p.list_calls == 2
+
+
+def test_the_first_discovery_is_never_served_from_the_empty_cache(monkeypatch):
+    """``time.monotonic()`` 在 Linux 上是**开机以来**的秒数。
+
+    刚起来的容器 / CI runner 上它可能只有 12 —— 而 ``_cache_at`` 的初值若是 ``0.0``，
+    ``now - 0.0 < discovery_ttl`` 就成立，第一次 ``discover()`` 直接返回空缓存，
+    provider 一次都不会被问到。表现是进程启动后的头一分钟内 ``lease()`` 找不到任何
+    实例，之后又莫名其妙好了。
+
+    开发机开机久了永远碰不到这条，CI 上必现 —— 这条测试就是为了不再靠运气。
+    """
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: 12.5)
+    p = FakeProvider(3)
+    pool = Pool([p], discovery_ttl=60)
+
+    assert len(pool.discover()) == 3
+    assert p.list_calls == 1, "第一次 discover() 必须真的问一遍 provider"
+
+    pool.discover()                     # 时间没走，这次才该命中缓存
+    assert p.list_calls == 1
 
 
 def test_a_broken_provider_does_not_block_the_pool():
