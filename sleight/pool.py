@@ -13,6 +13,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from itertools import count
 from typing import Any
 
 from .core.errors import Busy, LeaseStillHeld, NotFound, SleightError, TimeoutError
@@ -301,7 +302,7 @@ class Pool:
         self._cache_at = 0.0
         self._cache_lock = threading.Lock()
         self._failures: dict[str, tuple[int, float]] = {}     # name -> (次数, 下次可试时间)
-        self._cursor = 0
+        self._cursor = count()
         self._executor: ThreadPoolExecutor | None = None
 
     def __repr__(self) -> str:
@@ -421,11 +422,15 @@ class Pool:
         if where is not None:
             items = [i for i in items if where(i)]
 
-        # 按 provider 打散起始下标，否则 first-free 会一直把第一个 Manager 塞满。
-        # 只改变平级空闲实例的尝试顺序，不改变 first-free 语义。
+        # 打散起始下标，否则 first-free 会一直把第一个 Manager 塞满。只改变平级空闲
+        # 实例的尝试顺序，不改变 first-free 语义。
+        #
+        # 用 itertools.count 而不是 `self._cursor = (self._cursor + 1) % n`：后者是
+        # 无锁的读-改-写，并发 lease() 会算出同一个起点，于是所有线程先撞同一个实例 ——
+        # 恰好是打散想避免的。`next()` 在 CPython 里是原子的。
         if items:
-            self._cursor = (self._cursor + 1) % len(items)
-            items = items[self._cursor :] + items[: self._cursor]
+            offset = next(self._cursor) % len(items)
+            items = items[offset:] + items[:offset]
         return items
 
     def discover(self, *, force: bool = False) -> list[InstanceInfo]:

@@ -104,3 +104,47 @@ def test_release_is_idempotent():
     h.close()
     h.close()
     assert provider.release_calls == ["i0"]
+
+
+# --------------------------------------------------------------------------- #
+# MemoryLease 本身
+# --------------------------------------------------------------------------- #
+
+
+def test_expired_lease_cannot_be_renewed():
+    """哪怕还没被别人抢走，过期了也续不回来。
+
+    Redis 后端里 key 到点自动消失，renew 必然失败。内存后端如果只比 token 不看过期
+    时间，同一个卡顿场景在两个后端上结果完全相反 —— 一个悄悄续上接着发 CDP 命令，
+    一个抛 LeaseLost。两边都走"续不上"这条更安全的路径。
+    """
+    store = MemoryLease()
+    token = store.acquire("k", ttl=0.05)
+    assert token is not None
+    assert store.renew("k", token, ttl=0.05) is True
+
+    time.sleep(0.08)
+    assert store.renew("k", token, ttl=1.0) is False
+    assert store.held_keys() == set()
+
+
+def test_release_will_not_delete_someone_elses_lock():
+    """TTL 过期后你的 release 不能把接手者的锁删掉。"""
+    store = MemoryLease()
+    mine = store.acquire("k", ttl=0.05)
+    time.sleep(0.08)
+    theirs = store.acquire("k", ttl=5.0)         # 接手者
+    assert theirs is not None and theirs != mine
+
+    store.release("k", mine)                     # 迟到的清理
+    assert store.held_keys() == {"k"}
+    assert store.renew("k", theirs, ttl=5.0) is True
+
+
+def test_expired_lease_can_be_acquired_by_someone_else():
+    store = MemoryLease()
+    first = store.acquire("k", ttl=0.05)
+    assert store.acquire("k", ttl=5.0) is None   # 还在有效期内
+    time.sleep(0.08)
+    second = store.acquire("k", ttl=5.0)
+    assert second is not None and second != first

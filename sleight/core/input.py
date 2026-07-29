@@ -28,7 +28,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("sleight.input")
 
-__all__ = ["InputDriver", "resolve_profile"]
+__all__ = ["Aimable", "HumanSwitch", "InputDriver", "resolve_profile"]
+
+#: 能瞄准的东西：选择器 / 已解析的元素 / 裸坐标 / 裸几何
+Aimable = str | Element | Point | Box
+
+#: 单句拟人开关的三态。``None`` 继承 Session 默认，``False`` 直通，
+#: ``True`` 用 DEFAULT 预设，给 :class:`HumanProfile` 就用它
+HumanSwitch = bool | HumanProfile | None
 
 #: 元素滚进视口后，距离视口顶部的目标比例
 _SCROLL_TARGET_RATIO = 0.4
@@ -131,8 +138,25 @@ class InputDriver:
     # 目标解析
     # ------------------------------------------------------------------ #
 
+    def _pre_press_delay(self, nth: int, profile: HumanProfile | None) -> float:
+        """第 ``nth`` 次按下之前要等多久。
+
+        第一下等的是**反应时间**（到位之后、按下之前）；后续几下等的是双击间隔 ——
+        两者是不同的分布，而且 ``inter_click`` 必须落在浏览器的双击判定窗口内
+        （Chrome 约 500 ms），不能复用 ``dwell``（那是按住的时长）。
+
+        :param nth: 第几次按下，从 1 开始
+        :param profile: 已解析的 profile；``None``（直通）一律不等
+        :returns: 秒
+        """
+        if profile is None:
+            return 0.0
+        if nth == 1:
+            return engine.reaction_delay(self._rng, profile)
+        return engine.span(profile.inter_click, self._rng)
+
     def _target_box(
-        self, target: str | Element | Point | Box, *, human: HumanProfile | None
+        self, target: Aimable, *, human: HumanProfile | None
     ) -> tuple[Box | Point, Element | None]:
         """把各种目标形态归一成几何 + 可选的元素（用于命中校验）。
 
@@ -153,7 +177,7 @@ class InputDriver:
     # 动作
     # ------------------------------------------------------------------ #
 
-    def hover(self, target: str | Element | Point | Box, *, human=None) -> Point:
+    def hover(self, target: Aimable, *, human: HumanSwitch = None) -> Point:
         """只移动，不按下。
 
         :param target: 选择器 / :class:`~sleight.core.element.Element` /
@@ -173,9 +197,9 @@ class InputDriver:
 
     def click(
         self,
-        target: str | Element | Point | Box,
+        target: Aimable,
         *,
-        human=None,
+        human: HumanSwitch = None,
         button: str = "left",
         click_count: int = 1,
     ) -> Point:
@@ -219,11 +243,7 @@ class InputDriver:
                     landing, button=button, rng=self._rng, profile=profile, click_count=nth
                 )
                 + engine.release_events(landing, button=button, click_count=nth),
-                lead_delay=(
-                    engine.reaction_delay(self._rng, profile) if nth == 1
-                    else engine.span(profile.inter_click, self._rng) if profile is not None
-                    else 0.0
-                ),
+                lead_delay=self._pre_press_delay(nth, profile),
             )
         return landing
 
@@ -232,7 +252,7 @@ class InputDriver:
         target: str | Element | None,
         text: str,
         *,
-        human=None,
+        human: HumanSwitch = None,
         clear: bool = False,
     ) -> None:
         """逐字符输入。
@@ -264,7 +284,7 @@ class InputDriver:
         events, lead = engine.type_events(text, rng=self._rng, profile=profile)
         self._run(events, lead_delay=lead)
 
-    def press(self, chord: str, *, human=None) -> None:
+    def press(self, chord: str, *, human: HumanSwitch = None) -> None:
         """按一个键或组合键，打到当前焦点上。
 
         :param chord: ``"Enter"`` / ``"Ctrl+A"`` / ``"ctrl+shift+k"``，``+`` 分隔
@@ -274,7 +294,7 @@ class InputDriver:
         profile = self._profile(human)
         self._run(engine.chord_events(chord, rng=self._rng, profile=profile))
 
-    def scroll(self, dy: int, *, human=None) -> None:
+    def scroll(self, dy: int, *, human: HumanSwitch = None) -> None:
         """在光标当前位置滚轮。滚的是**光标下面**那个容器。
 
         :param dy: 距离，px。正数向下
@@ -283,7 +303,7 @@ class InputDriver:
         profile = self._profile(human)
         self._run(engine.scroll_events(self.cursor, dy, rng=self._rng, profile=profile))
 
-    def scroll_into_view(self, target: str | Element, *, human=None) -> None:
+    def scroll_into_view(self, target: str | Element, *, human: HumanSwitch = None) -> None:
         """把元素滚进视口。
 
         - **默认**：发真实 ``mouseWheel`` 分步滚动（有滚动事件序列，像人）

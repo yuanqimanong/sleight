@@ -9,12 +9,11 @@
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal
+from typing import ClassVar
 
 __all__ = [
     "Box",
@@ -30,9 +29,6 @@ __all__ = [
     "Selector",
     "Text",
 ]
-
-_EMPTY_MAP: Mapping[str, str] = MappingProxyType({})
-
 
 @dataclass(frozen=True, slots=True)
 class Point:
@@ -193,15 +189,3 @@ class NetworkIdle(Condition):
     quiet: float = 0.5
     kind: ClassVar[str] = "netidle"
 
-
-def replace(obj: Any, **changes: Any) -> Any:
-    """``dataclasses.replace`` 的转发。
-
-    :param obj: 任意 dataclass 实例
-    :param changes: 字段名 → 新值
-    :returns: 改了这些字段的新实例，原对象不变
-    """
-    return dataclasses.replace(obj, **changes)
-
-
-HumanMode = bool | None | Literal["default"]

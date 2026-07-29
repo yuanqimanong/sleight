@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _installed_version
 from typing import Any
 
 from ._logging import enable_debug_logging
@@ -26,7 +28,7 @@ from .core.errors import (
     SleightError,
 )
 from .core.human import CAREFUL, DEFAULT, FAST, HumanProfile
-from .core.session import Session
+from .core.session import Selectable, Session
 from .core.transport import Transport
 from .core.types import (
     Box,
@@ -44,7 +46,10 @@ from .core.types import (
 )
 from .pool import InstanceHandle, Pool
 
-__version__ = "0.1.0a1"
+try:
+    __version__ = _installed_version("sleight")
+except PackageNotFoundError:      # 从源码目录直接 import，没装进环境
+    __version__ = "0.0.0.dev0"
 
 __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "__version__",
@@ -52,6 +57,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "Pool",
     "InstanceHandle",
     "Session",
+    "Selectable",
     "Element",
     "Transport",
     "enable_debug_logging",

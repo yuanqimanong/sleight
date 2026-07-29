@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from sleight.core._redact import redact, redact_headers, redact_url
+from sleight.core._redact import redact, redact_url
 from sleight.core.types import (
     Box,
     DomReady,
@@ -57,11 +57,6 @@ def test_redact_url_masks_query_credentials_and_userinfo():
 def test_redact_masks_bearer_tokens_anywhere_in_a_message():
     assert TOKEN not in redact(f"403 from manager (Authorization: Bearer {TOKEN})")
 
-
-def test_redact_headers_leaves_harmless_ones_alone():
-    masked = redact_headers({"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"})
-    assert TOKEN not in masked["Authorization"]
-    assert masked["Accept"] == "application/json"
 
 
 def test_short_secrets_are_fully_masked():

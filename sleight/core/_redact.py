@@ -7,11 +7,9 @@ dataclass 的默认 repr 会把 ``Authorization: Bearer ...`` 原样打进 trace
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 
-__all__ = ["redact", "redact_headers", "redact_url"]
+__all__ = ["redact", "redact_url"]
 
-_SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token"})
 _SENSITIVE_QUERY = re.compile(r"([?&](?:token|api_?key|access_token|auth|password|secret)=)([^&#]+)", re.I)
 _BEARER = re.compile(r"(Bearer\s+)([A-Za-z0-9._\-]{8,})", re.I)
 
@@ -44,14 +42,3 @@ def redact_url(url: str) -> str:
     url = re.sub(r"://([^/@]+)@", "://***@", url)
     return _SENSITIVE_QUERY.sub(lambda m: m.group(1) + _mask(m.group(2)), url)
 
-
-def redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """遮蔽请求头里的凭据字段，其余原样返回。
-
-    :param headers: 原始请求头
-    :returns: 新的 dict；``authorization`` / ``cookie`` / ``x-api-key`` 等已遮蔽
-    """
-    return {
-        k: (_mask(v) if k.lower() in _SENSITIVE_HEADERS else v)
-        for k, v in headers.items()
-    }

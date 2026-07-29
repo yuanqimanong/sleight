@@ -22,7 +22,7 @@ from typing import Any
 from .element import Element
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
 from .human.presets import HumanProfile
-from .input import InputDriver
+from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
 from .protocol import Event
 from .transport import Transport
@@ -30,7 +30,7 @@ from .types import Box, Condition, DomReady, Point
 
 log = logging.getLogger("sleight.session")
 
-__all__ = ["Session"]
+__all__ = ["Selectable", "Session"]
 
 _POLL_MIN = 0.10
 _POLL_MAX = 0.25
@@ -39,7 +39,9 @@ _PUMP_SLICE = 0.05
 #: 无字段的 frozen dataclass，共享一个实例即可（也让 ruff B008 满意）
 _DEFAULT_WAIT = DomReady()
 
-Target = str | Element
+#: 交互方法收的目标形态。叫 ``Selectable`` 而不是 ``Target`` —— 这个文件里
+#: ``Target.createTarget`` / ``Target.attachToTarget`` 满地都是，同名会读岔
+Selectable = str | Element
 
 
 class Session:
@@ -391,7 +393,7 @@ class Session:
         """
         return [Element(self, selector, i) for i in range(self._count(selector))]
 
-    def require(self, target: Target) -> Element:
+    def require(self, target: Selectable) -> Element:
         """把选择器或 Element 统一成一个**确认存在**的 Element。
 
         :param target: CSS 选择器字符串，或已有的 Element
@@ -422,9 +424,9 @@ class Session:
 
     def click(
         self,
-        target: Target | Point | Box,
+        target: Selectable | Point | Box,
         *,
-        human: bool | HumanProfile | None = None,
+        human: HumanSwitch = None,
         button: str = "left",
         click_count: int = 1,
     ) -> None:
@@ -443,7 +445,7 @@ class Session:
         """
         self._input.click(target, human=human, button=button, click_count=click_count)
 
-    def double_click(self, target: Target | Point | Box, **kw: Any) -> None:
+    def double_click(self, target: Selectable | Point | Box, **kw: Any) -> None:
         """双击 —— **两次完整的按下抬起**，``detail`` 依次为 1、2。
 
         :param target: 同 :meth:`click`
@@ -453,10 +455,10 @@ class Session:
 
     def type(
         self,
-        target: Target | None,
+        target: Selectable | None,
         text: str,
         *,
-        human: bool | HumanProfile | None = None,
+        human: HumanSwitch = None,
         clear: bool = False,
     ) -> None:
         """点击聚焦后逐字符输入。
@@ -473,7 +475,7 @@ class Session:
         """
         self._input.type(target, text, human=human, clear=clear)
 
-    def press(self, key: str, *, human: bool | HumanProfile | None = None) -> None:
+    def press(self, key: str, *, human: HumanSwitch = None) -> None:
         """按一个键或组合键，打到当前焦点上。
 
         修饰键自己的 keyDown / keyUp 会真的发出去，不是只设 modifiers 位。
@@ -485,7 +487,7 @@ class Session:
         """
         self._input.press(key, human=human)
 
-    def scroll(self, dy: int, *, human: bool | HumanProfile | None = None) -> None:
+    def scroll(self, dy: int, *, human: HumanSwitch = None) -> None:
         """在光标当前位置滚轮。滚的是**光标下面**那个容器。
 
         :param dy: 距离，px。正数向下
@@ -493,9 +495,7 @@ class Session:
         """
         self._input.scroll(dy, human=human)
 
-    def scroll_into_view(
-        self, target: Target, *, human: bool | HumanProfile | None = None
-    ) -> None:
+    def scroll_into_view(self, target: Selectable, *, human: HumanSwitch = None) -> None:
         """把元素滚进视口。
 
         拟人模式发真实 ``mouseWheel`` 分步滚动；直通模式走
@@ -507,9 +507,7 @@ class Session:
         """
         self._input.scroll_into_view(target, human=human)
 
-    def hover(
-        self, target: Target | Point | Box, *, human: bool | HumanProfile | None = None
-    ) -> None:
+    def hover(self, target: Selectable | Point | Box, *, human: HumanSwitch = None) -> None:
         """只移动光标过去，不按下。
 
         :param target: 同 :meth:`click`
