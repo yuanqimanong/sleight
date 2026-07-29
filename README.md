@@ -135,7 +135,10 @@ BiDi · Firefox.
 
 ## Status
 
-`0.1.0a1` — alpha, the API will move. Every release documents its breaking changes.
+`0.x` — alpha, the API will move. Every release documents its breaking changes.
+Releases are published from a git tag by
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) via PyPI Trusted
+Publishing — no token is stored in this repository.
 
 ## License
 

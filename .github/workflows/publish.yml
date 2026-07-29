@@ -1,0 +1,90 @@
+# 打 tag 触发发布到 PyPI。走 Trusted Publishing（OIDC）—— 仓库里不存任何 token。
+#
+# PyPI 侧要配一个 Trusted Publisher（Manage → Publishing → GitHub）：
+#   Owner            yuanqimanong
+#   Repository name  sleight
+#   Workflow name    publish.yml      ← 是文件名，不是下面那行 name:
+#   Environment name pypi             ← 必须和 publish job 的 environment 完全一致
+#
+# GitHub 侧要建一个叫 pypi 的 Environment（Settings → Environments），并勾上
+# Required reviewers。**这是唯一的手滑保险** —— PyPI 的版本号一旦占用就永久不能
+# 再用，删掉也不能重传。
+
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 构建与校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先校验，再干别的 —— 版本号对不上就没必要跑测试了。
+      # tag 与 pyproject 不一致的后果是发出一个和 tag 完全无关的版本，而且事后改不了。
+      - name: 校验 tag 与 pyproject 版本号一致
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          proj_version=$(python3 -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          echo "tag=$tag_version  pyproject=$proj_version"
+          if [ "$tag_version" != "$proj_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 对应版本 $tag_version，但 pyproject.toml 里是 $proj_version"
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: pytest
+        run: uv run pytest -q
+
+      - name: 构建
+        run: uv build
+
+      # twine check 验的是 README 在 PyPI 上能不能正常渲染
+      - name: twine check
+        run: uv tool run --from twine twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: 发布到 PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # environment 带 Required reviewers，所以这一步会停下来等人点 Approve
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sleight/
+
+    # OIDC 的开关。少了它整套 Trusted Publishing 不成立，报错是
+    # "OIDC token request failed"。**不能**放到仓库级默认权限里，必须写在 job 上。
+    permissions:
+      id-token: write
+
+    # 故意不 checkout、不跑任何第三方构建代码：拿到 id-token 的这个 job 越干净，
+    # 供应链攻击能利用的面越小。它只需要上一个 job 产出的 dist/。
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # 不加 skip-existing —— 那会把"版本号重复"这个真问题变成静默通过
+      - uses: pypa/gh-action-pypi-publish@release/v1
