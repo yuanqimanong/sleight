@@ -9,16 +9,18 @@ description = "Drive any CDP browser like a human — trajectories, typing rhyth
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "sleight contributors" }]
 keywords = ["cdp", "chrome-devtools-protocol", "browser", "automation", "human-like"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
 ]
 dependencies = ["websocket-client>=1.9"]
 
@@ -28,6 +30,9 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.urls]
 Homepage = "https://github.com/yuanqimanong/sleight"
+Repository = "https://github.com/yuanqimanong/sleight"
+Issues = "https://github.com/yuanqimanong/sleight/issues"
+Documentation = "https://github.com/yuanqimanong/sleight/blob/main/docs/%E8%AF%A6%E7%BB%86%E6%96%87%E6%A1%A3%E6%89%8B%E5%86%8C.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sleight"]
@@ -37,7 +42,7 @@ artifacts = ["sleight/py.typed"]
 [tool.hatch.build.targets.sdist]
 # 显式白名单。默认会把 .idea/ 和 .claude/settings.local.json 一并打进去，
 # 里面带着开发机的绝对路径。
-include = ["sleight", "tests", "docs", "README.md", "pyproject.toml"]
+include = ["sleight", "tests", "docs", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100
