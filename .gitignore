@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 编辑器 / IDE —— 里面是开发机的绝对路径
+.idea/
+.vscode/
+
+# 本机的 Claude Code 配置（.claude/settings.json 这类共享配置仍然入库）
+.claude/settings.local.json
+
+# 凭据
+.env
+*.pem
+*.key
+
+# scripts/plot_path.py 的输出
+*.png

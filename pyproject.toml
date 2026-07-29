@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sleight"
+version = "0.1.0a1"
+description = "Drive any CDP browser like a human — trajectories, typing rhythm, instance leasing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "sleight contributors" }]
+keywords = ["cdp", "chrome-devtools-protocol", "browser", "automation", "human-like"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+dependencies = ["websocket-client>=1.9"]
+
+[project.optional-dependencies]
+redis = ["redis>=5"]
+dev = ["pytest>=8", "ruff>=0.6", "matplotlib>=3.8"]
+
+[project.urls]
+Homepage = "https://github.com/yuanqimanong/sleight"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sleight"]
+# 没有它 mypy 会把 sleight 当成无类型包，全量 type hints 对使用者等于不存在
+artifacts = ["sleight/py.typed"]
+
+[tool.hatch.build.targets.sdist]
+# 显式白名单。默认会把 .idea/ 和 .claude/settings.local.json 一并打进去，
+# 里面带着开发机的绝对路径。
+include = ["sleight", "tests", "docs", "scripts", "README.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# RUF001/2/3: 注释和文档字符串是中文的，全角标点是有意为之
+# A001/A002: errors.py 有意遮蔽 ConnectionError / TimeoutError，给包内统一入口
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a real browser on --remote-debugging-port",
+    "manager: needs a real CloakBrowser Manager",
+]
