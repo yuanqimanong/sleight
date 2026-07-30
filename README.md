@@ -126,8 +126,8 @@ variable).
 
 **Does:** navigation and typed wait conditions · rendered-DOM reads · CSS queries ·
 human mouse / keyboard / wheel · structured network-resource capture · instance
-discovery across providers · cooperative exclusive leasing with TTL renewal ·
-idempotent recovery.
+discovery across providers · cooperative exclusive leasing with TTL renewal
+(in-memory, or Redis-backed across processes) · idempotent recovery.
 
 **Does not:** data extraction · scheduling and queues · fingerprint spoofing (that is
 the browser's job) · iframe / OOPIF / Shadow DOM piercing · strict fencing · WebDriver
