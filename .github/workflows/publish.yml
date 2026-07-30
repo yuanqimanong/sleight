@@ -24,7 +24,7 @@ jobs:
     name: 构建与校验
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 先校验，再干别的 —— 版本号对不上就没必要跑测试了。
       # tag 与 pyproject 不一致的后果是发出一个和 tag 完全无关的版本，而且事后改不了。
@@ -38,7 +38,9 @@ jobs:
             exit 1
           fi
 
-      - uses: astral-sh/setup-uv@v5
+      # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
+      # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
@@ -57,7 +59,7 @@ jobs:
       - name: twine check
         run: uv tool run --from twine twine check dist/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -81,7 +83,7 @@ jobs:
     # 故意不 checkout、不跑任何第三方构建代码：拿到 id-token 的这个 job 越干净，
     # 供应链攻击能利用的面越小。它只需要上一个 job 产出的 dist/。
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/

@@ -35,9 +35,11 @@ jobs:
             os: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
+      # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -51,9 +53,11 @@ jobs:
     name: ruff
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
+      # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
@@ -66,9 +70,11 @@ jobs:
     name: 打包可用性
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
+      # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
