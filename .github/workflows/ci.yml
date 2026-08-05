@@ -102,3 +102,22 @@ jobs:
           assert ProfileSpec.windows_us('x').viewport_height == 947
           print('smoke ok', sleight.__version__)
           "
+
+      # 部署层：console script 装上了没有、界面的 index.html 有没有被打进 wheel、
+      # 以及在**没装 fastapi**的环境里 sleight ui 会不会给一句人话
+      - name: 部署 CLI 冒烟
+        run: |
+          cd /tmp
+          /tmp/probe/bin/sleight --version
+          /tmp/probe/bin/sleight hosts ls
+          /tmp/probe/bin/python -c "
+          from pathlib import Path
+          import sleight.deploy.api.app as api
+          from sleight.deploy import DeploySpec, Deployer, LocalRunner
+          from sleight.deploy.render import render_compose
+          assert 'AUTH_TOKEN:?' in render_compose(DeploySpec())
+          assert Path(api.INDEX).is_file(), 'index.html missing from the wheel'
+          print('deploy smoke ok')
+          "
+          # 探针环境没装 [ui]，所以这里不会真的起服务；要的是那句人话而不是 traceback
+          /tmp/probe/bin/sleight ui 2>&1 | grep -q 'sleight\[ui\]'
