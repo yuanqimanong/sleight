@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from .runner import Runner
 from .spec import DeploySpec, split_image
@@ -35,7 +35,7 @@ GOOD_MEM_KB = 16 * 1024 * 1024
 MIN_DISK_KB = 20 * 1024 * 1024
 
 
-class CheckLevel(str, Enum):
+class CheckLevel(StrEnum):
     OK = "ok"
     WARN = "warn"
     FAIL = "fail"

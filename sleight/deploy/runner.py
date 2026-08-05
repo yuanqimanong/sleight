@@ -253,7 +253,14 @@ class LocalRunner(_BaseRunner):
         os.replace(tmp, target)
 
     def put_dir(self, local: str, remote: str, *, sudo: bool = False) -> None:
-        if sudo or os.name == "nt":
+        """本机复制，走原生 ``shutil`` 而不是 ``sh -c tar``。
+
+        Windows 上尤其必须走这条：那边的路径带反斜杠和盘符，塞进
+        ``shlex.quote`` + ``sh`` 会被搅成 ``C\:\\Users\...`` 然后 tar 报
+        "Cannot open"。``replace()`` 之前先 rmtree 掉目标，所以在 Windows 上也成立
+        （那边 ``os.replace`` 不能覆盖一个已存在的目录）。
+        """
+        if sudo:
             super().put_dir(local, remote, sudo=sudo)
             return
         src, dst = Path(local), Path(remote)

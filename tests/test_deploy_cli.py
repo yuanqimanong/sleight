@@ -67,7 +67,7 @@ def test_inventory_round_trip():
         deploy={"dir": "/srv/cbm", "port": 9100, "expose": True},
     ))
     path = inv.save()
-    assert path.read_text().count("[hosts.hk-01") == 2      # 主表 + deploy 子表
+    assert path.read_text(encoding="utf-8").count("[hosts.hk-01") == 2      # 主表 + deploy 子表
 
     host = Inventory.load().get("hk-01")
     assert host.ssh == "deploy@1.2.3.4"
@@ -82,7 +82,7 @@ def test_inventory_never_writes_a_token():
     """能 SSH 上去就能读到目标机的 .env，控制机上再存一份只是多一个泄漏点。"""
     inv = Inventory.load()
     inv.add(Host(name="a", ssh="u@h", deploy={"dir": "/srv/x"}))
-    text = inv.save().read_text()
+    text = inv.save().read_text(encoding="utf-8")
     assert "token" not in text.lower() or "AUTH_TOKEN 在它自己的 .env" in text
 
 
