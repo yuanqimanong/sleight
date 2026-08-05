@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import email.message
 import io
 import json
@@ -60,6 +61,8 @@ class FakeManager:
     def __init__(self, routes: dict[tuple[str, str], object]) -> None:
         self.routes = routes
         self.log: list[tuple[str, str, object]] = []
+        #: 每个请求用的超时。launch/stop 是同步等浏览器的，必须比通用超时长得多
+        self.timeouts: list[tuple[str, str, float | None]] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeManager:
         monkeypatch.setattr(urllib.request, "urlopen", self._urlopen)
@@ -78,6 +81,7 @@ class FakeManager:
         path = req.full_url[len(BASE):] if req.full_url.startswith(BASE) else req.full_url
         body = json.loads(req.data) if req.data else None
         self.log.append((method, path, body))
+        self.timeouts.append((method, path, timeout))
 
         route = self.routes.get((method, path))
         if route is None:
@@ -543,3 +547,78 @@ def test_plain_without_a_ws_url_is_a_connection_error(monkeypatch: pytest.Monkey
     p = plain(monkeypatch, {("GET", "/json/version"): (200, {"Browser": "Chrome/146"})})
     with pytest.raises(ConnectionError, match="webSocketDebuggerUrl"):
         p.endpoint()
+
+
+# --------------------------------------------------------------------------- #
+# 原始字段与 CDP target 列表（运维层要用的两个读接口）
+# --------------------------------------------------------------------------- #
+
+
+def test_list_profiles_keeps_the_fields_instanceinfo_drops(monkeypatch: pytest.MonkeyPatch):
+    """InstanceInfo 只留驱动层要的四个字段；运维要看 launch_args / proxy / notes。"""
+    raw = {**PROFILE_RUNNING, "launch_args": ["--lang=en-US"], "proxy": "socks5://h:1"}
+    mgr, _ = manager(monkeypatch, {("GET", "/api/profiles"): (200, [raw])})
+    assert mgr.list_profiles() == [raw]
+
+
+def test_list_profiles_rejects_a_non_list(monkeypatch: pytest.MonkeyPatch):
+    mgr, _ = manager(monkeypatch, {("GET", "/api/profiles"): (200, {"detail": "nope"})})
+    with pytest.raises(InstanceError):
+        mgr.list_profiles()
+
+
+def test_cdp_targets_returns_the_target_list(monkeypatch: pytest.MonkeyPatch):
+    targets = [{"type": "page", "url": "https://example.com"}]
+    mgr, _ = manager(monkeypatch, {("GET", "/api/profiles/p1/cdp/json/list"): (200, targets)})
+    assert mgr.cdp_targets("p1") == targets
+
+
+def test_cdp_targets_of_a_stopped_instance_is_empty_not_an_error(monkeypatch: pytest.MonkeyPatch):
+    """停止的实例访问 CDP 返回 404 —— 那是"没有 target"，不是故障。"""
+    mgr, _ = manager(
+        monkeypatch,
+        {("GET", "/api/profiles/p1/cdp/json/list"): (404, {"detail": "Profile not running"})},
+    )
+    assert mgr.cdp_targets("p1") == []
+
+
+def test_cdp_targets_5xx_is_an_instance_error(monkeypatch: pytest.MonkeyPatch):
+    mgr, _ = manager(
+        monkeypatch, {("GET", "/api/profiles/p1/cdp/json/list"): (502, {"detail": "bad gateway"})}
+    )
+    with pytest.raises(InstanceError):
+        mgr.cdp_targets("p1")
+
+
+# --------------------------------------------------------------------------- #
+# 生命周期接口的超时
+# --------------------------------------------------------------------------- #
+
+
+def test_launch_gets_a_long_timeout_because_it_waits_for_a_browser(monkeypatch: pytest.MonkeyPatch):
+    """``POST /launch`` 是同步的 —— 它等 Chromium 真的起来才返回。
+
+    实测冷启动约 69 秒（3.8 GB 内存的机器）。用通用的 15s 超时的话，会在浏览器
+    **其实已经起来**的情况下抛 ConnectionError，而调用方从那个异常里根本看不出
+    实例到底起没起。
+    """
+    mgr, http = manager(monkeypatch, {
+        ("GET", "/api/profiles/p1/status"): ST_STOPPED,
+        ("POST", "/api/profiles/p1/launch"): (200, {"status": "running"}),
+    })
+    mgr.ready_timeout = 0.0                      # 只看 launch 那一发
+    with contextlib.suppress(InstanceError):
+        mgr.ensure_ready("p1")
+
+    launch = [t for m, p, t in http.timeouts if m == "POST" and p.endswith("/launch")]
+    status = [t for m, p, t in http.timeouts if m == "GET" and p.endswith("/status")]
+    assert launch == [mgr.lifecycle_timeout]
+    assert mgr.lifecycle_timeout >= 120.0, "冷启动一个 profile 实测就要 69 秒"
+    assert status[0] != mgr.lifecycle_timeout, "普通读接口不该也用这个长超时"
+
+
+def test_stop_gets_the_same_long_timeout(monkeypatch: pytest.MonkeyPatch):
+    """停一个 profile 也要等浏览器进程真的退出。"""
+    mgr, http = manager(monkeypatch, {("POST", "/api/profiles/p1/stop"): (200, {"ok": True})})
+    mgr.stop("p1")
+    assert [t for m, p, t in http.timeouts if m == "POST"] == [mgr.lifecycle_timeout]

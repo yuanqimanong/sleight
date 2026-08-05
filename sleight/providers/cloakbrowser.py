@@ -368,16 +368,45 @@ class CloakBrowserManager(HTTPProvider):
             raise InstanceError(f"{self.name}: GET profile returned {r.status}")
         return r.body
 
+    def list_profiles(self) -> list[dict[str, Any]]:
+        """全部 profile 的**原始**字段。
+
+        :meth:`list_instances` 返回的 :class:`~sleight.core.types.InstanceInfo` 只保留
+        驱动层要用的四个字段；运维要看 ``launch_args`` / ``proxy`` / ``notes``，那些只在
+        原始 dict 里。
+
+        :returns: Manager 返回的 dict 列表
+        """
+        r = self._http.get(API)
+        if not r.ok or not isinstance(r.body, list):
+            raise InstanceError(f"{self.name}: GET {API} returned {r.status}")
+        return list(r.body)
+
     def find_profile(self, name: str) -> dict[str, Any] | None:
         """按**名字**找 profile —— 名字换 id 就靠它。
 
         :param name: profile 名，精确匹配
         :returns: 原始 dict；没找到返回 ``None``
         """
-        r = self._http.get(API)
+        return next((p for p in self.list_profiles() if p.get("name") == name), None)
+
+    def cdp_targets(self, instance_id: str) -> list[dict[str, Any]]:
+        """``GET /api/profiles/{id}/cdp/json/list`` —— 实例里现在有哪些 CDP target。
+
+        排查"扩展到底加载了没有"就靠它：加载成功的扩展会以
+        ``chrome-extension://<32位id>/…`` 出现在这个列表里。MV3 的 service worker
+        起来要几秒，太快查会是空的。
+
+        :param instance_id: profile id
+        :returns: target 列表。实例没在运行时是空列表（Manager 返回 404）
+        :raises InstanceError: Manager 返回了别的状态码
+        """
+        r = self._http.get(self._instance_path(instance_id, "/cdp/json/list"))
+        if r.status == 404:
+            return []
         if not r.ok or not isinstance(r.body, list):
-            raise InstanceError(f"{self.name}: GET {API} returned {r.status}")
-        return next((p for p in r.body if p.get("name") == name), None)
+            raise InstanceError(f"{self.name}: cdp/json/list returned {r.status} {r.detail}")
+        return list(r.body)
 
     def create_profile(self, spec: ProfileSpec, *, launch: bool = False) -> InstanceInfo:
         """新建一个 profile。**不做去重** —— 同名会再建一个，幂等要用
