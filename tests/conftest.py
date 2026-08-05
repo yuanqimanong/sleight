@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import re
+import shlex
 import threading
 import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
 
 from sleight.core.element import Element
 from sleight.core.types import Box, Endpoint, InstanceInfo, InstanceStatus
+from sleight.deploy.runner import CommandResult
 from sleight.providers.base import BaseProvider
 
 
@@ -247,3 +251,256 @@ def run_threads(fn: Any, n: int, timeout: float = 30.0) -> list[BaseException]:
     for t in threads:
         t.join(timeout)
     return errors
+
+
+# --------------------------------------------------------------------------- #
+# 部署层的替身
+# --------------------------------------------------------------------------- #
+
+
+class FakeRunner:
+    """一台假的目标机。
+
+    自带一个极简的 POSIX 语义（``test`` / ``mkdir -p`` / ``cat`` / ``mv`` / ``rm -rf``
+    和 ``sh -c 'cat > x'``），docker 之类的命令必须在 ``replies`` 里显式给 —— **没给的
+    命令一律返回 127**。这一点是刻意的：engine 少发一条命令、多发一条命令，或者把
+    ``docker inspect`` 的形状改了，测试都会当场变红，而不是悄悄走过去。
+    """
+
+    def __init__(
+        self,
+        *,
+        label: str = "fake",
+        files: dict[str, str] | None = None,
+        dirs: Sequence[str] = (),
+        replies: dict[str, tuple[int, str]] | None = None,
+        unwritable: Sequence[str] = (),
+        after_up: tuple[int, str] = (0, "running\thealthy\tcloakhq/cloakbrowser-manager:v0.0.10"),
+    ) -> None:
+        self.label = label
+        self.files: dict[str, str] = dict(files or {})
+        self.dirs: set[str] = set(dirs)
+        self.replies: dict[str, tuple[int, str]] = dict(replies or {})
+        self.unwritable = set(unwritable)
+        #: 每一条执行过的命令，按顺序
+        self.commands: list[tuple[str, ...]] = []
+        self.sudo_commands: list[tuple[str, ...]] = []
+        self.pushed: list[tuple[str, str]] = []
+        self.streamed: list[tuple[str, ...]] = []
+        self.modes: dict[str, int] = {}
+        self.closed = False
+        #: `docker compose up` 之后 `docker inspect` 该返回什么。替身也得有"启动"这个
+        #: 因果，否则 wait_healthy 会对着一个永远 absent 的容器轮询到超时。
+        #: 构造时显式给了 inspect 回复的测试以它为准，不做这个联动。
+        self.after_up = after_up
+        #: 权限检查（find ! -perm）返回几个 —— > 0 就是 chmod a+rX 没做
+        self.unreadable_entries = 0
+        self._pinned_inspect = "docker inspect --format" in (replies or {})
+        for path in list(self.files):
+            self._mkdirs(path.rsplit("/", 1)[0])
+
+    # —— 断言辅助 ——
+
+    def ran(self, *fragment: str) -> bool:
+        """有没有执行过以 ``fragment`` 开头的命令。"""
+        return any(cmd[: len(fragment)] == fragment for cmd in self.commands)
+
+    def find(self, *fragment: str) -> list[tuple[str, ...]]:
+        return [cmd for cmd in self.commands if cmd[: len(fragment)] == fragment]
+
+    def count(self, *fragment: str) -> int:
+        return len(self.find(*fragment))
+
+    # —— Runner 接口 ——
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        cwd: str | None = None,
+        timeout: float | None = None,
+        sudo: bool = False,
+        check: bool = False,
+    ) -> CommandResult:
+        argv = tuple(argv)
+        self.commands.append(argv)
+        if sudo:
+            self.sudo_commands.append(argv)
+        code, out = self._dispatch(argv, stdin)
+        # 真的 CLI 失败时把原因写在 stderr 上，替身也照这个来 —— 否则测不到
+        # preflight 是怎么解读 docker 的错误消息的
+        err = "" if code == 0 else (out or f"fake: {argv[0]} failed")
+        result = CommandResult(argv, code, out, err)
+        return result.check() if check else result
+
+    def _dispatch(self, argv: tuple[str, ...], stdin: bytes | None) -> tuple[int, str]:
+        self._transition(argv)
+        joined = " ".join(argv)
+        for key in sorted(self.replies, key=len, reverse=True):
+            if joined.startswith(key):
+                return self.replies[key]
+
+        match argv:
+            case ("uname", *_):
+                return 0, "Linux x86_64"
+            case ("id", "-un"):
+                return 0, "tester"
+            case ("id", "-u"):
+                return 0, "1000"
+            case ("id", "-g"):
+                return 0, "1000"
+            case ("test", "-d", path):
+                return (0, "") if path in self.dirs else (1, "")
+            case ("test", "-e", path):
+                return (0, "") if path in self.dirs or path in self.files else (1, "")
+            case ("test", "-w", path):
+                writable = path in self.dirs and path not in self.unwritable
+                return (0, "") if writable else (1, "")
+            case ("mkdir", "-p", path):
+                self._mkdirs(path)
+                return 0, ""
+            case ("cat", path):
+                return (0, self.files[path]) if path in self.files else (1, "")
+            case ("mv", "-f", src, dst) | ("mv", src, dst):
+                if src not in self.files:
+                    return 1, ""
+                self.files[dst] = self.files.pop(src)
+                if src in self.modes:
+                    self.modes[dst] = self.modes.pop(src)
+                return 0, ""
+            case ("chmod", mode, path):
+                self.modes[path] = int(mode, 8)
+                return 0, ""
+            case ("chmod", "-R", *_) | ("chown", *_):
+                return 0, ""
+            case ("rm", "-rf", path):
+                self.dirs.discard(path)
+                for key in [k for k in self.files if k == path or k.startswith(path + "/")]:
+                    del self.files[key]
+                for key in [d for d in self.dirs if d.startswith(path + "/")]:
+                    self.dirs.discard(key)
+                return 0, ""
+            case ("tar", *_):
+                return 0, ""
+            case ("sh", "-c", script):
+                return self._shell(script, stdin)
+        return 127, ""
+
+    def _transition(self, argv: tuple[str, ...]) -> None:
+        """compose 的启停改变容器状态 —— 这是引擎判断"要不要重建"的唯一依据。"""
+        if self._pinned_inspect or argv[:2] != ("docker", "compose") or len(argv) < 3:
+            return
+        key = "docker inspect --format"
+        match argv[2]:
+            case "up" | "start":
+                self.replies[key] = self.after_up
+            case "stop":
+                self.replies[key] = (0, "exited\tnone\tcloakhq/cloakbrowser-manager:v0.0.10")
+            case "down":
+                self.replies[key] = (1, "")
+
+    def _shell(self, script: str, stdin: bytes | None) -> tuple[int, str]:
+        if script.startswith("cat > "):
+            path = shlex.split(script[len("cat > ") :])[0]
+            self.files[path] = (stdin or b"").decode()
+            self._mkdirs(path.rsplit("/", 1)[0])
+            return 0, ""
+        if script.startswith("ls -1 "):
+            root = shlex.split(script[len("ls -1 ") :])[0]
+            names = {
+                d[len(root) + 1 :].split("/")[0]
+                for d in list(self.dirs) + list(self.files)
+                if d.startswith(root + "/")
+            }
+            return 0, "\n".join(sorted(names))
+        if "! -perm" in script:                     # 权限检查：容器里的非 root 读不到几个
+            return 0, str(self.unreadable_entries)
+        if "-type f | wc -l" in script:
+            root = shlex.split(script)[1]
+            return 0, str(sum(1 for f in self.files if f.startswith(root + "/")))
+        if "wc -l" in script:
+            return 0, "0"
+        return 0, ""
+
+    def _mkdirs(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        for i in range(1, len(parts) + 1):
+            self.dirs.add("/" + "/".join(parts[:i]))
+
+    def read_text(self, path: str, *, sudo: bool = False) -> str | None:
+        return self.files.get(path)
+
+    def put_text(self, text: str, path: str, *, mode: int | None = None, sudo: bool = False) -> None:
+        self.files[path] = text
+        self._mkdirs(path.rsplit("/", 1)[0])
+        if mode is not None:
+            self.modes[path] = mode
+
+    def put_dir(self, local: str, remote: str, *, sudo: bool = False) -> None:
+        """真的把本地目录的内容搬进假文件系统 —— 这样 push 之后的校验才是真在校验。"""
+        from pathlib import Path
+
+        self.pushed.append((local, remote))
+        self._mkdirs(remote)
+        root = Path(local)
+        for path in root.rglob("*"):
+            if path.is_file():
+                rel = path.relative_to(root).as_posix()
+                self.files[f"{remote}/{rel}"] = path.read_text(encoding="utf-8", errors="replace")
+                self._mkdirs(f"{remote}/{rel}".rsplit("/", 1)[0])
+
+    def stream(self, argv: Sequence[str], *, cwd: str | None = None) -> int:
+        self.streamed.append(tuple(argv))
+        return 0
+
+    @contextmanager
+    def tunnel(self, remote_port: int, *, remote_host: str = "127.0.0.1") -> Iterator[int]:
+        yield remote_port
+
+    def close(self) -> None:
+        self.closed = True
+
+
+#: 一台 docker 一切正常、端口空闲、内存充足的机器
+def docker_ok(
+    *,
+    container: str = "cloakbrowser-manager",
+    listening: Sequence[int] = (22,),
+    mounts: str = "",
+    mem_kb: int = 16 * 1024 * 1024,
+    avail_kb: int = 80 * 1024 * 1024,
+    inspect: tuple[int, str] | None = None,
+) -> dict[str, tuple[int, str]]:
+    """给 :class:`FakeRunner` 用的一套 docker 探测回复。"""
+    ss = "State Recv-Q Send-Q Local-Address:Port Peer-Address:Port\n" + "\n".join(
+        f"LISTEN 0      4096   127.0.0.1:{p}          0.0.0.0:*" for p in listening
+    )
+    return {
+        "docker version": (0, "27.3.1"),
+        "docker compose version": (0, "2.29.7"),
+        # 兜底：pull / up / down / stop / start / logs 一律成功。要测失败路径就在
+        # 测试里覆盖更长的键（回复按键长度从长到短匹配）
+        "docker compose": (0, ""),
+        "docker logs": (0, ""),
+        "docker rm": (0, ""),
+        # 一次性 root 容器（备份和删 data/ 用它绕开 root 拥有的文件）
+        "docker run": (0, ""),
+        "docker image inspect": (1, ""),
+        "docker ps -a --format": (0, mounts),
+        "docker ps --filter": (0, ""),
+        "ss -ltn": (0, ss),
+        "cat /proc/meminfo": (0, f"MemTotal:       {mem_kb} kB\nMemFree: 100 kB\n"),
+        "df -Pk": (0, f"Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                      f"/dev/sda1 200000000 100 {avail_kb} 40% /"),
+        "docker exec": (1, ""),
+        "docker port": (1, ""),
+        # inspect 刻意不给默认值：给了就等于把容器状态钉死，FakeRunner 的
+        # up/stop/down 联动会失效，wait_healthy 只能轮询到超时
+        **({"docker inspect --format": inspect} if inspect else {}),
+    }
+
+
+@pytest.fixture
+def runner() -> FakeRunner:
+    return FakeRunner(replies=docker_ok())

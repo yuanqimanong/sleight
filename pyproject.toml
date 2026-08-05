@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sleight"
-version = "0.1.4"
+version = "0.2.0"
 description = "Drive any CDP browser like a human — trajectories, typing rhythm, instance leasing."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "sleight contributors" }]
-keywords = ["cdp", "chrome-devtools-protocol", "browser", "automation", "human-like"]
+keywords = ["cdp", "chrome-devtools-protocol", "browser", "automation", "human-like", "deployment"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,9 +26,24 @@ dependencies = ["websocket-client>=1.9"]
 
 [project.optional-dependencies]
 redis = ["redis>=5"]
+# 部署功能的引擎和 CLI 只用标准库；这个 extra 只是 sleight ui 那个 Web 界面要的。
+ui = ["fastapi>=0.115", "uvicorn>=0.30"]
 # redis / fakeredis 进 dev：不装的话 tests/test_lease_redis.py 连 import 都过不去。
 # fakeredis[lua] 带真 Lua 解释器，CAS 脚本因此在 CI 里是被真正执行的，不是走替身。
-dev = ["pytest>=8", "ruff>=0.6", "redis>=5", "fakeredis[lua]>=2.26"]
+# httpx 是 fastapi 的 TestClient 要的，只在测试里用。
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "redis>=5",
+    "fakeredis[lua]>=2.26",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+# 部署与运维入口。sleight --help 列全部子命令
+sleight = "sleight.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yuanqimanong/sleight"
@@ -56,10 +71,16 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # A001/A002: errors.py 有意遮蔽 ConnectionError / TimeoutError，给包内统一入口
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.per-file-ignores]
+# B008: `= Body(...)` / `= Query(...)` 就是 FastAPI 声明请求参数的方式，
+# 把它挪进函数体等于放弃框架的校验和自动文档
+"sleight/deploy/api/app.py" = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "integration: needs a real browser on --remote-debugging-port",
     "manager: needs a real CloakBrowser Manager",
     "redis: needs a real Redis at $SLEIGHT_TEST_REDIS_URL",
+    "deploy: needs a real docker daemon (and for --ssh, a reachable host)",
 ]

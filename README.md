@@ -7,6 +7,7 @@ browser instance pools.
 Python ≥ 3.11 · one runtime dependency (`websocket-client`) · MIT
 
 📖 **[中文文档手册](docs/详细文档手册.md)** — 安装、快速开始、实战场景、CloakBrowser Manager 部署
+🚀 **[部署与运维 CLI](docs/部署与运维%20CLI.md)** — 一条命令把 Manager 部署到本机或远程
 
 ```bash
 pip install sleight
@@ -73,6 +74,28 @@ with pool.lease(where=lambda i: "us" in i.tags) as inst:
     ...
 ```
 
+## Getting a fleet to drive
+
+The hard part of running CloakBrowser is not the driving — it is the deployment, the
+extension rollout, and the "why does this profile behave differently" archaeology.
+So the same package ships a CLI for it. Local docker or a remote host over SSH is
+the same code path, only the runner differs:
+
+```bash
+sleight deploy --ssh deploy@10.0.0.12 --dir /srv/cloakbrowser-manager --sudo
+sleight status --host hk-01
+sleight ext push ./plugins/bypass-paywalls --host hk-01   # MV3 check + permissions
+sleight ext apply --host hk-01                            # every profile, then restart
+sleight ext verify --host hk-01                           # did the browser really load it
+sleight ui                                                # the same, in a browser
+```
+
+Deploys are idempotent, `--dry-run` prints the exact bytes it would write, and the
+things you must not do are refused rather than documented: no `latest` tag, no
+`down -v`, no silently rotating an in-use `AUTH_TOKEN`, no second manager on the same
+`/data`. The engine is stdlib-only (SSH is the system `ssh` binary); only
+`sleight ui` needs `pip install "sleight[ui]"`.
+
 ## Why this exists
 
 Fingerprint-level anti-detection is a solved problem — CloakBrowser patches Chromium
@@ -127,11 +150,15 @@ variable).
 **Does:** navigation and typed wait conditions · rendered-DOM reads · CSS queries ·
 human mouse / keyboard / wheel · structured network-resource capture · instance
 discovery across providers · cooperative exclusive leasing with TTL renewal
-(in-memory, or Redis-backed across processes) · idempotent recovery.
+(in-memory, or Redis-backed across processes) · idempotent recovery · deploying and
+operating CloakBrowser Manager over local docker or SSH, extensions included.
 
 **Does not:** data extraction · scheduling and queues · fingerprint spoofing (that is
 the browser's job) · iframe / OOPIF / Shadow DOM piercing · strict fencing · WebDriver
 BiDi · Firefox.
+
+The deploy layer lives in its own subpackage and is never imported by `import sleight`,
+so the driver stays a one-dependency library.
 
 ## Status
 

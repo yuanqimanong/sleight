@@ -106,6 +106,13 @@ class HTTPProvider(BaseProvider, ABC):
     stop_path = "/stop"
     ready_timeout = 60.0
     ready_poll = 0.5
+    #: ``launch`` / ``stop`` 的 HTTP 超时，秒。
+    #:
+    #: **不能用通用的那个 15s。** 这两个接口是**同步**的 —— 它们等浏览器进程真的起来
+    #: 或停掉才返回。实测冷启动一个 profile 约 69 秒（3.8 GB 内存的机器，含 Xvnc 拉起
+    #: 和写默认书签），用 15s 的话会在**浏览器其实已经起来**的情况下抛 ConnectionError，
+    #: 而调用方从那个异常里完全看不出实例到底起没起。
+    lifecycle_timeout = 300.0
     #: launch 命中即视为"已在运行"，幂等成功
     already_running: tuple[int, ...] = (409,)
     #: stop 命中即视为"已停止" —— 仅作辅助，仍需 status() 复核
@@ -214,7 +221,9 @@ class HTTPProvider(BaseProvider, ABC):
     # -------------------------- 内部 ------------------------------------ #
 
     def _launch(self, instance_id: str) -> HttpResponse:
-        r = self._http.post(self._instance_path(instance_id, self.launch_path))
+        r = self._http.post(
+            self._instance_path(instance_id, self.launch_path), timeout=self.lifecycle_timeout
+        )
         if r.ok or r.status in self.already_running:
             return r
         if r.status == 404:
@@ -223,7 +232,9 @@ class HTTPProvider(BaseProvider, ABC):
         raise InstanceError(f"{self.name}: launch {instance_id} failed ({r.status}) {r.detail}")
 
     def _stop(self, instance_id: str, *, tolerate_stopped: bool = False) -> HttpResponse:
-        r = self._http.post(self._instance_path(instance_id, self.stop_path))
+        r = self._http.post(
+            self._instance_path(instance_id, self.stop_path), timeout=self.lifecycle_timeout
+        )
         if r.ok:
             return r
         if r.status in self.already_stopped:
