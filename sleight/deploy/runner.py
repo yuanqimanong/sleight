@@ -253,7 +253,7 @@ class LocalRunner(_BaseRunner):
         os.replace(tmp, target)
 
     def put_dir(self, local: str, remote: str, *, sudo: bool = False) -> None:
-        """本机复制，走原生 ``shutil`` 而不是 ``sh -c tar``。
+        r"""本机复制，走原生 ``shutil`` 而不是 ``sh -c tar``。
 
         Windows 上尤其必须走这条：那边的路径带反斜杠和盘符，塞进
         ``shlex.quote`` + ``sh`` 会被搅成 ``C\:\\Users\...`` 然后 tar 报

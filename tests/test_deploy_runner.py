@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import warnings
+from pathlib import Path
 
 import pytest
 
@@ -356,3 +358,26 @@ def test_local_file_ops_never_shell_out(tmp_path, monkeypatch):
 
     assert shelled == [], f"这些本该是原生调用，却走了 shell: {shelled}"
     assert (tmp_path / "dst" / "a.js").read_text() == "x"
+
+
+def test_the_whole_package_compiles_without_warnings():
+    r"""整个包在编译期不许有任何警告。
+
+    这条是 0.2.0 发出去之后才发现的：一个 docstring 里写了 ``C\\:\\\\Users``，非 raw
+    字符串里 ``\\:`` 是无效转义，于是**每个** import 这个模块的人都会看到一行
+    SyntaxWarning。它只在编译期出现，普通测试全都抓不到 —— 而且 Python 计划把无效
+    转义从警告升成 SyntaxError。
+    """
+    import sleight
+
+    root = Path(sleight.__file__).parent
+    problems = []
+    for path in sorted(root.rglob("*.py")):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+        problems += [
+            f"{path.relative_to(root)}:{w.lineno} {w.category.__name__}: {w.message}"
+            for w in caught
+        ]
+    assert not problems, "\n".join(problems)

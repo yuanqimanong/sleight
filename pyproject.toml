@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sleight"
-version = "0.2.0"
+version = "0.2.1"
 description = "Drive any CDP browser like a human — trajectories, typing rhythm, instance leasing."
 readme = "README.md"
 requires-python = ">=3.11"
