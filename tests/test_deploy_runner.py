@@ -331,3 +331,28 @@ def test_two_runners_share_the_control_dir(rec):
     second = [a for a in rec.argv if a.startswith("ControlPath=")]
     if os.name != "nt":
         assert first == second and first
+
+
+def test_local_file_ops_never_shell_out(tmp_path, monkeypatch):
+    """本机读写和复制必须走原生 os/shutil，不能走 ``sh -c``。
+
+    这条是 Windows 上炸出来的：那边的路径带反斜杠和盘符，塞进 shlex.quote + sh
+    会被搅成 ``C\\:\\\\Users\\...``，tar 报 "Cannot open"。而且 Windows 上本来就
+    没有 POSIX shell 可以假定存在。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.js").write_text("x")
+
+    runner = LocalRunner()
+    shelled: list[tuple] = []
+    monkeypatch.setattr(
+        runner, "run", lambda *a, **kw: shelled.append(a) or CommandResult((), 0)
+    )
+
+    runner.put_text("hi", str(tmp_path / "f.txt"), mode=0o600)
+    runner.put_dir(str(src), str(tmp_path / "dst"))
+    assert runner.read_text(str(tmp_path / "f.txt")) == "hi"
+
+    assert shelled == [], f"这些本该是原生调用，却走了 shell: {shelled}"
+    assert (tmp_path / "dst" / "a.js").read_text() == "x"
