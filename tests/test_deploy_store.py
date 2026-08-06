@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 import pytest
@@ -37,7 +38,8 @@ def test_the_db_lands_under_sleight_home(tmp_path):
     assert store_path().is_file()
 
 
-def test_the_home_dir_is_private(tmp_path):
+@pytest.mark.skipif(os.name == "nt", reason="Windows 没有 POSIX 权限位，靠用户 profile 的 ACL")
+def test_the_home_dir_is_private():
     """里面是运维目标机的清单，别人不该能列。"""
     Store()
     assert oct(store_path().parent.stat().st_mode)[-3:] == "700"
