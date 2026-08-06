@@ -186,7 +186,14 @@ class DeploySpec:
         if not _CONTAINER_RE.match(self.container_name):
             problems.append(f"container_name={self.container_name!r} is not a valid container name")
 
-        if not self.dir.startswith("/"):
+        if self.dir.startswith("~"):
+            # 命令行里 shell 会先展开 ~，所以只有界面上手打才会走到这。展开需要知道
+            # 目标机上那个用户的 home，而 spec 是纯数据、手上没有 runner。
+            problems.append(
+                f"dir={self.dir!r} 用了 ~，这里不会展开它 —— 部署目录是**目标机上**的路径，"
+                "而展开 ~ 需要先连上去问。写全，比如 /home/你的用户名/cloakbrowser-manager"
+            )
+        elif not self.dir.startswith("/"):
             problems.append(f"dir={self.dir!r} must be an absolute path on the target host")
         if any(c in self.dir for c in "\n\r\t\0"):
             problems.append("dir contains a control character")

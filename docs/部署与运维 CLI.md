@@ -35,7 +35,7 @@ python 单行命令，收成了可重跑的子命令。
 **本机**（这台机器上有 docker）：
 
 ```bash
-sleight deploy --dir ~/cloakbrowser-manager
+sleight deploy --dir ~/cloakbrowser-manager   # shell 会展开 ~
 ```
 
 **远程**：
@@ -182,6 +182,10 @@ docker 组里）。而且用的是 `sudo -n`（非交互）：目标机没配免
 不会挂死。
 
 不想配 sudo 就把部署目录放在自己有权限的地方：`--dir ~/cloakbrowser-manager`。
+
+> 命令行里的 `~` 是**你的 shell** 展开的。在 Web 界面里手打就没人替你展开了 ——
+> 那里要写全路径（`/home/你的用户名/cloakbrowser-manager`）。展开 `~` 得先连上目标机
+> 问它那个用户的 home 在哪，而校验发生在连接之前。
 
 ## 4. 部署
 

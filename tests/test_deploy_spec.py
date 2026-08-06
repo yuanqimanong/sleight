@@ -241,3 +241,24 @@ def test_values_with_hash_get_quoted():
 
 def test_empty_value_is_quoted_not_dropped():
     assert parse_env(format_env({"K": ""})) == {"K": ""}
+
+
+def test_a_tilde_path_says_why_it_cannot_be_expanded():
+    """命令行里 shell 会先展开 ~，界面上手打就不会 —— 那时得说清怎么办。
+
+    展开 ~ 需要知道目标机上那个用户的 home，而 spec 是纯数据，手上没有 runner。
+    """
+    with pytest.raises(ValueError, match="不会展开") as exc:
+        DeploySpec(dir="~/cloakbrowser-manager").validate()
+    assert "/home/" in str(exc.value), "光说不行还不够，得给个能照抄的例子"
+
+
+def test_the_recommended_dir_is_something_the_validator_accepts():
+    """推荐值必须自己能过校验 —— 照着推荐填却被拒绝是最伤人的。"""
+    import re
+
+    from sleight.deploy.presets import FIELD_HELP
+
+    for path in re.findall(r"(/[\w./-]+)", FIELD_HELP["dir"].recommend):
+        DeploySpec(dir=path).validate()
+    assert "~" not in FIELD_HELP["dir"].recommend

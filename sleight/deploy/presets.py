@@ -86,7 +86,8 @@ FIELD_HELP: dict[str, FieldHelp] = {
         "部署目录",
         "compose 文件、.env 和 data/ 都在这里。data/ 里是 profile 数据库、指纹种子、"
         "Cookie 和全部登录态 —— 换目录等于换一套全新的浏览器。",
-        f"自己有权限的路径最省事，比如 ~/cloakbrowser-manager；系统级用 {DeploySpec().dir}",
+        "自己家目录下最省事（不用 sudo）—— 写全路径，比如 /home/kali/cloakbrowser-manager；"
+        f"系统级用 {DeploySpec().dir}",
     ),
     "image": FieldHelp(
         "镜像",
