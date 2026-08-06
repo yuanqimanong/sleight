@@ -11,10 +11,10 @@ import json
 import pytest
 
 from sleight import cli
-from sleight.deploy.errors import DeployError
-from sleight.deploy.inventory import Host, Inventory, sleight_home
+from sleight.deploy.inventory import sleight_home
 from sleight.deploy.render import parse_env
 from sleight.deploy.spec import DeploySpec
+from sleight.deploy.store import Store
 
 from .conftest import FakeRunner, docker_ok
 
@@ -39,19 +39,24 @@ def target(monkeypatch):
     )
 
     def resolve(args):
-        spec = SPEC
+        """照着真的 _resolve 走一遍，只是把 Runner 换成替身。
+
+        给了 --host 就真去库里查 —— 记流水那条路径依赖的就是这个记录。
+        """
+        deployment = Store().resolve(args.host) if getattr(args, "host", None) else None
+        spec = deployment.spec if deployment else SPEC
         for flag, field in cli._SPEC_FLAGS.items():
             value = getattr(args, flag, None)
             if value is not None:
                 spec = spec.replace(**{field: value})
-        return runner, spec, bool(getattr(args, "sudo", False))
+        return runner, spec, bool(getattr(args, "sudo", False)), deployment
 
     monkeypatch.setattr(cli, "_resolve", resolve)
     return runner
 
 
 # --------------------------------------------------------------------------- #
-# 清单
+# 本地库
 # --------------------------------------------------------------------------- #
 
 
@@ -59,71 +64,9 @@ def test_home_follows_the_env_var(isolated_home):
     assert sleight_home() == isolated_home
 
 
-def test_inventory_round_trip():
-    inv = Inventory.load()
-    inv.add(Host(
-        name="hk-01", ssh="deploy@1.2.3.4", port=2222, identity="~/.ssh/id_ed25519",
-        sudo=True, strict_host_key="accept-new",
-        deploy={"dir": "/srv/cbm", "port": 9100, "expose": True},
-    ))
-    path = inv.save()
-    assert path.read_text(encoding="utf-8").count("[hosts.hk-01") == 2      # 主表 + deploy 子表
-
-    host = Inventory.load().get("hk-01")
-    assert host.ssh == "deploy@1.2.3.4"
-    assert host.port == 2222
-    assert host.sudo is True
-    assert host.strict_host_key == "accept-new"
-    assert host.spec().port == 9100
-    assert host.spec().dir == "/srv/cbm"
-
-
-def test_inventory_never_writes_a_token():
-    """能 SSH 上去就能读到目标机的 .env，控制机上再存一份只是多一个泄漏点。"""
-    inv = Inventory.load()
-    inv.add(Host(name="a", ssh="u@h", deploy={"dir": "/srv/x"}))
-    text = inv.save().read_text(encoding="utf-8")
-    assert "token" not in text.lower() or "AUTH_TOKEN 在它自己的 .env" in text
-
-
-def test_missing_file_is_an_empty_inventory():
-    assert Inventory.load().hosts == {}
-
-
-def test_unknown_host_lists_the_known_ones():
-    inv = Inventory.load()
-    inv.add(Host(name="hk-01", ssh="u@h"))
-    inv.save()
-    with pytest.raises(DeployError, match="hk-01"):
-        Inventory.load().get("sg-02")
-
-
-def test_broken_toml_is_reported_not_ignored():
-    """静默忽略会让人以为主机没配上，然后在错误的方向排半天。"""
-    path = sleight_home()
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "hosts.toml").write_text("[hosts.a\nssh =")
-    with pytest.raises(DeployError, match="valid TOML"):
-        Inventory.load()
-
-
-def test_odd_host_names_get_quoted():
-    inv = Inventory.load()
-    inv.add(Host(name="prod.hk 01", ssh="u@h"))
-    inv.save()
-    assert Inventory.load().get("prod.hk 01").ssh == "u@h"
-
-
-def test_empty_host_means_local():
-    assert Host(name="local").local
-    assert not Host(name="x", ssh="u@h").local
-
-
-def test_host_spec_ignores_none_overrides():
-    """命令行没给的参数不该把配置文件里的值打掉。"""
-    host = Host(name="a", deploy={"port": 9100})
-    assert host.spec(port=None, dir=None).port == 9100
-    assert host.spec(port=9200).port == 9200
+def test_the_cli_and_the_store_agree_on_where_the_db_is():
+    """CLI 每条命令都新开一个 Store，路径必须稳定，不然写进去的下一条命令读不到。"""
+    assert Store().path == sleight_home() / "sleight.db"
 
 
 # --------------------------------------------------------------------------- #
@@ -334,19 +277,63 @@ def test_hosts_add_then_ls_then_rm(capsys):
 
     assert cli.main(["hosts", "ls"]) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert "hk-01" in out and "deploy@1.2.3.4" in out and "9100" in out
+    assert "hk-01" in out and "deploy@1.2.3.4" in out
 
-    host = Inventory.load().get("hk-01")
-    assert host.sudo and host.spec().port == 9100
+    # 一台没有部署记录的主机没法用，所以 add 顺带建了 default
+    host = Store().require_host("hk-01")
+    assert host.sudo
+    assert Store().resolve("hk-01").spec.port == 9100
 
     assert cli.main(["hosts", "rm", "hk-01"]) == cli.EXIT_OK
-    assert Inventory.load().hosts == {}
+    assert Store().hosts() == []
+    assert Store().deployments() == []
+
+
+def test_deployments_add_ls_rm(capsys):
+    cli.main(["hosts", "add", "hk-01", "--ssh", "u@h", "--dir", "/srv/a", "--port", "9000"])
+    capsys.readouterr()
+
+    assert cli.main([
+        "deployments", "add", "hk-01", "second", "--dir", "/srv/b", "--port", "9001",
+    ]) == cli.EXIT_OK
+    capsys.readouterr()
+
+    assert cli.main(["deployments", "ls"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "hk-01/default" in out and "hk-01/second" in out
+
+    assert cli.main(["deployments", "rm", "hk-01/second"]) == cli.EXIT_OK
+    assert [d.name for d in Store().deployments()] == ["default"]
+
+
+def test_a_second_deployment_on_one_host_gets_its_own_container(capsys):
+    """不加后缀的话第二个 Manager 会把第一个的容器删掉 —— 真机上踩过。"""
+    cli.main(["hosts", "add", "h", "--ssh", "u@h", "--dir", "/srv/a", "--port", "9000"])
+    cli.main(["deployments", "add", "h", "second", "--dir", "/srv/b", "--port", "9001"])
+    first, second = Store().deployments(host="h")
+    assert first.spec.container_name != second.spec.container_name
+    assert first.spec.name != second.spec.name
+
+
+def test_history_records_what_happened(capsys, target):
+    cli.main(["hosts", "add", "h", "--dir", "/srv/cbm", "--port", "9000"])
+    capsys.readouterr()
+    cli.main(["deploy", "--host", "h"])
+    capsys.readouterr()
+    assert cli.main(["history"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "deploy" in out and "成功" in out and "h/default" in out
+
+
+def test_history_is_empty_at_first(capsys):
+    assert cli.main(["history"]) == cli.EXIT_OK
+    assert "还没有流水" in capsys.readouterr().out
 
 
 def test_hosts_add_validates_before_saving(capsys):
     """存一个部署不了的配置，等于把错误推迟到最不方便的时刻。"""
     assert cli.main(["hosts", "add", "bad", "--ssh", "u@h", "--port", "0"]) == cli.EXIT_ERROR
-    assert Inventory.load().hosts == {}
+    assert Store().deployments() == []
 
 
 def test_hosts_rm_of_an_unknown_host(capsys):
@@ -356,6 +343,11 @@ def test_hosts_rm_of_an_unknown_host(capsys):
 def test_hosts_subcommand_is_required(capsys):
     assert cli.main(["hosts"]) == cli.EXIT_USAGE
     assert "hosts ls|add|rm" in capsys.readouterr().err
+
+
+def test_deployments_subcommand_is_required(capsys):
+    assert cli.main(["deployments"]) == cli.EXIT_USAGE
+    assert "deployments ls|add|rm" in capsys.readouterr().err
 
 
 def test_ext_and_profiles_need_a_subcommand_too(capsys):

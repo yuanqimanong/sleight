@@ -82,13 +82,17 @@ So the same package ships a CLI for it. Local docker or a remote host over SSH i
 the same code path, only the runner differs:
 
 ```bash
-sleight deploy --ssh deploy@10.0.0.12 --dir /srv/cloakbrowser-manager --sudo
-sleight status --host hk-01
+sleight hosts add hk-01 --ssh deploy@10.0.0.12 --dir /srv/cloakbrowser-manager --sudo
+sleight deploy --host hk-01
+sleight deployments add hk-01 second --dir /srv/cbm-2 --port 9001   # same box, second manager
 sleight ext push ./plugins/bypass-paywalls --host hk-01   # MV3 check + permissions
 sleight ext apply --host hk-01                            # every profile, then restart
 sleight ext verify --host hk-01                           # did the browser really load it
 sleight ui                                                # the same, in a browser
 ```
+
+Hosts, the managers on each of them, and a deploy/backup/upgrade audit trail live in a
+local SQLite database (`~/.sleight/sleight.db`) that the CLI and the web UI share.
 
 Deploys are idempotent, `--dry-run` prints the exact bytes it would write, and the
 things you must not do are refused rather than documented: no `latest` tag, no

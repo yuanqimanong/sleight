@@ -21,11 +21,11 @@ from typing import Any
 from .core.errors import SleightError
 from .deploy.engine import Deployer
 from .deploy.errors import DeployError, PreflightFailed
-from .deploy.inventory import Host, Inventory
 from .deploy.ops import ExtensionOps, ProfileOps
 from .deploy.preflight import CheckLevel, worst
 from .deploy.runner import Runner, describe
 from .deploy.spec import DEFAULT_IMAGE, DeploySpec
+from .deploy.store import Deployment, Host, Store
 
 __all__ = ["main"]
 
@@ -105,19 +105,41 @@ _SPEC_FLAGS = {
 }
 
 
-def _resolve(args: argparse.Namespace) -> tuple[Runner, DeploySpec, bool]:
-    """命令行 + ``hosts.toml`` → (Runner, DeploySpec, 是否用 sudo)。
+def _store() -> Store:
+    return Store()
 
-    命令行显式给的值覆盖配置文件；没给的（``None``）不参与覆盖，所以
-    ``sleight deploy --host hk-01`` 不会把 TOML 里的设置打掉。
+
+def _spec_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """命令行显式给了的字段。没给的是 ``None``，不参与覆盖 —— 所以
+    ``sleight deploy --host hk-01`` 不会把库里存的配置打掉。"""
+    return {
+        field: getattr(args, flag)
+        for flag, field in _SPEC_FLAGS.items()
+        if getattr(args, flag, None) is not None
+    }
+
+
+def _resolve(args: argparse.Namespace) -> tuple[Runner, DeploySpec, bool, Deployment | None]:
+    """命令行 + 本地库 → (Runner, DeploySpec, 是否 sudo, 库里的那条部署记录)。
+
+    ``--host`` 收 ``主机`` 或 ``主机/部署名``：一台机器可以跑多个 Manager，只给主机名
+    而它有多个时会报错并列出来 —— 猜一个然后往错的 Manager 上发命令是不能接受的。
+
+    ``--ssh`` 是临时目标，不进库，也就没有部署记录（返回 ``None``）。
     """
     if args.host and args.ssh:
-        raise DeployError("--host and --ssh are mutually exclusive: one names a configured "
-                          "target, the other spells one out")
+        raise DeployError("--host and --ssh are mutually exclusive: one names a target stored "
+                          "in the local database, the other spells one out")
+
+    deployment: Deployment | None = None
     if args.host:
-        host = Inventory.load().get(args.host)
+        store = _store()
+        deployment = store.resolve(args.host)
+        host = store.require_host(deployment.host)
+        spec = deployment.spec.replace(**_spec_overrides(args))
     else:
         host = Host(name=args.ssh or "local", ssh=args.ssh or "")
+        spec = DeploySpec(**_spec_overrides(args))
 
     if args.ssh_port:
         host = replace(host, port=args.ssh_port)
@@ -126,23 +148,38 @@ def _resolve(args: argparse.Namespace) -> tuple[Runner, DeploySpec, bool]:
     if args.accept_new:
         host = replace(host, strict_host_key="accept-new")
     sudo = bool(args.sudo or host.sudo)
-
-    overrides = {
-        field: getattr(args, flag) for flag, field in _SPEC_FLAGS.items() if hasattr(args, flag)
-    }
-    spec = host.spec(**overrides)
-    return host.runner(batch=not args.interactive_auth), spec, sudo
+    return host.runner(batch=not args.interactive_auth), spec, sudo, deployment
 
 
 def _deployer(args: argparse.Namespace) -> Deployer:
-    runner, spec, sudo = _resolve(args)
-    return Deployer(
+    runner, spec, sudo, deployment = _resolve(args)
+    dep = Deployer(
         spec,
         runner,
         sudo=sudo,
         dry_run=getattr(args, "dry_run", False),
         on_progress=_printer(args),
     )
+    #: 库里的那条记录（``--ssh`` 临时目标时是 None）。运维动作完成后回写它
+    dep.record = deployment                                        # type: ignore[attr-defined]
+    return dep
+
+
+def _record(dep: Deployer, kind: str, *, ok: bool, detail: str = "", status: Any = None) -> None:
+    """把这次动作记进本地库。``--ssh`` 临时目标没有记录可写，直接跳过。
+
+    **永远不抛** —— 记不上账不该让已经成功的运维动作变成失败。
+    """
+    entry: Deployment | None = getattr(dep, "record", None)
+    if entry is None:
+        return
+    try:
+        store = _store()
+        if ok and kind in ("deploy", "upgrade", "rollback"):
+            store.record_deploy(entry.host, entry.name, image=dep.spec.image, status=status or {})
+        store.log_event(entry.host, kind, ok=ok, deployment=entry.name, detail=detail)
+    except Exception as exc:                                       # 记账不该阻断
+        logging.getLogger("sleight.cli").debug("记流水失败: %s", exc)
 
 
 def _tunnel_hint(dep: Deployer, *, local_port: int = 19000) -> str:
@@ -182,6 +219,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         return EXIT_PREFLIGHT if plan.blocked else EXIT_OK
 
     result = dep.apply(pull=not args.no_pull, wait=not args.no_wait, force=args.force)
+    _record(dep, "deploy", ok=True, status=result.status,
+            detail="有变更" if result.changed else "无变更")
     if args.json:
         _dump({
             "changed": result.changed,
@@ -276,6 +315,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
 def cmd_upgrade(args: argparse.Namespace) -> int:
     dep = _deployer(args)
     result = dep.upgrade(args.image, backup=not args.no_backup)
+    _record(dep, "upgrade", ok=True, status=result.status, detail=f"→ {args.image}")
     _dump({"changed": result.changed, "status": result.status}) if args.json else _out(
         result.summary
     )
@@ -285,6 +325,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 def cmd_rollback(args: argparse.Namespace) -> int:
     dep = _deployer(args)
     result = dep.rollback()
+    _record(dep, "rollback", ok=True, status=result.status, detail=f"→ {dep.spec.image}")
     _dump({"status": result.status}) if args.json else _out(result.summary)
     return EXIT_OK
 
@@ -292,6 +333,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 def cmd_backup(args: argparse.Namespace) -> int:
     dep = _deployer(args)
     archive = dep.backup()
+    _record(dep, "backup", ok=True, detail=archive)
     _dump({"archive": archive}) if args.json else _out(f"已归档 {dep.runner.label}:{archive}")
     return EXIT_OK
 
@@ -307,6 +349,7 @@ def cmd_destroy(args: argparse.Namespace) -> int:
         _err("已取消")
         return EXIT_ERROR
     dep.destroy(purge_data=args.purge_data)
+    _record(dep, "destroy", ok=True, detail="连 data/ 一起删" if args.purge_data else "保留 data/")
     _out("容器已删除" + ("，data/ 也删了" if args.purge_data else "，data/ 保留"))
     return EXIT_OK
 
@@ -344,60 +387,131 @@ def cmd_tunnel(args: argparse.Namespace) -> int:
 
 
 def cmd_hosts_ls(args: argparse.Namespace) -> int:
-    inv = Inventory.load()
+    store = _store()
+    hosts = store.hosts()
+    deployments = store.deployments()
     if args.json:
-        _dump({n: {**h.to_toml_table(), "name": n} for n, h in inv.hosts.items()})
+        _dump([
+            {**h.to_dict(), "deployments": [d.to_dict() for d in deployments if d.host == h.name]}
+            for h in hosts
+        ])
         return EXIT_OK
-    if not inv.hosts:
-        _out(f"{inv.path} 里还没有主机。加一台：")
+    if not hosts:
+        _out(f"{store.path} 里还没有主机。加一台：")
         _out("  sleight hosts add hk-01 --ssh deploy@1.2.3.4 --dir /srv/cloakbrowser-manager")
         return EXIT_OK
     rows = [
         [
-            name,
-            host.ssh or "(本机)",
-            str(host.port or ""),
-            host.deploy.get("dir", DeploySpec().dir),
-            str(host.deploy.get("port", DeploySpec().port)),
-            "是" if host.sudo else "",
+            h.name,
+            h.ssh or "(本机)",
+            str(h.port or ""),
+            "是" if h.sudo else "",
+            str(sum(1 for d in deployments if d.host == h.name)),
+            h.notes,
         ]
-        for name, host in sorted(inv.hosts.items())
+        for h in hosts
     ]
-    _out(_table(rows, ["名字", "SSH", "端口", "部署目录", "Manager 端口", "sudo"]))
-    _out(f"\n{inv.path}")
+    _out(_table(rows, ["主机", "SSH", "端口", "sudo", "Manager 数", "备注"]))
+    _out(f"\n{store.path}")
     return EXIT_OK
 
 
 def cmd_hosts_add(args: argparse.Namespace) -> int:
-    inv = Inventory.load()
-    deploy = {
-        field: getattr(args, flag)
-        for flag, field in _SPEC_FLAGS.items()
-        if getattr(args, flag, None) is not None
-    }
-    if deploy:                                    # 存进去之前先确认这些值能部署
-        DeploySpec.from_dict(deploy).validate()
-    host = Host(
+    """记一台主机，顺带建一个叫 default 的部署。
+
+    一台没有部署记录的主机是没法用的（``deploy --host X`` 不知道往哪个目录发），
+    所以这里一步到位 —— 要在同一台机上跑第二个 Manager 再用 ``deployments add``。
+    """
+    store = _store()
+    store.put_host(Host(
         name=args.name,
         ssh=args.ssh or "",
         port=args.ssh_port,
         identity=args.identity or "",
         sudo=bool(args.sudo),
         strict_host_key="accept-new" if args.accept_new else "",
-        deploy=deploy,
-    )
-    inv.add(host)
-    path = inv.save()
-    _out(f"已写入 {path} 的 [hosts.{args.name}]")
-    _out(f"试一下：sleight preflight --host {args.name}")
+        notes=args.notes or "",
+    ))
+    spec = DeploySpec(**_spec_overrides(args))
+    store.put_deployment(args.name, "default", spec)
+    _out(f"已写入 {store.path}")
+    _out(f"  主机 {args.name}  →  {args.ssh or '本机'}")
+    _out(f"  部署 {args.name}/default  →  {spec.dir}  端口 {spec.port}  镜像 {spec.image}")
+    _out(f"\n试一下：sleight preflight --host {args.name}")
     return EXIT_OK
 
 
 def cmd_hosts_rm(args: argparse.Namespace) -> int:
-    inv = Inventory.load()
-    inv.remove(args.name)
-    inv.save()
-    _out(f"已从清单里删掉 {args.name}（目标机上的部署没有动）")
+    store = _store()
+    count = len(store.deployments(host=args.name))
+    store.delete_host(args.name)
+    _out(f"已删掉主机 {args.name} 和它的 {count} 条部署记录（**目标机上的东西没有动**）")
+    _out("要真的拆掉 Manager，先 sleight destroy 再删记录")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# 部署记录（一台机上的 N 个 Manager）
+# --------------------------------------------------------------------------- #
+
+
+def cmd_deployments_ls(args: argparse.Namespace) -> int:
+    store = _store()
+    rows_data = store.deployments(host=args.only_host)
+    if args.json:
+        _dump([d.to_dict() for d in rows_data])
+        return EXIT_OK
+    if not rows_data:
+        _out("还没有部署记录。加一个：")
+        _out("  sleight hosts add hk-01 --ssh deploy@1.2.3.4 --dir /srv/cloakbrowser-manager")
+        return EXIT_OK
+    rows = [
+        [
+            d.ref,
+            d.spec.dir,
+            f"{d.spec.bind_ip}:{d.spec.port}",
+            d.spec.container_name,
+            (d.image or d.spec.image).split("/")[-1],
+            d.deployed_at or "从未部署",
+        ]
+        for d in rows_data
+    ]
+    _out(_table(rows, ["主机/部署", "目录", "监听", "容器名", "镜像", "最后部署"]))
+    return EXIT_OK
+
+
+def cmd_deployments_add(args: argparse.Namespace) -> int:
+    store = _store()
+    spec = DeploySpec(**_spec_overrides(args))
+    store.put_deployment(args.host_name, args.name, spec)
+    _out(f"已记下 {args.host_name}/{args.name}  →  {spec.dir}  端口 {spec.port}")
+    _out(f"试一下：sleight preflight --host {args.host_name}/{args.name}")
+    return EXIT_OK
+
+
+def cmd_deployments_rm(args: argparse.Namespace) -> int:
+    store = _store()
+    host_name, _, name = args.ref.partition("/")
+    store.delete_deployment(host_name, name or "default")
+    _out(f"已删掉记录 {args.ref}（**目标机上的东西没有动**）")
+    return EXIT_OK
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    store = _store()
+    events = store.events(host=args.only_host, limit=args.limit)
+    if args.json:
+        _dump([e.to_dict() for e in events])
+        return EXIT_OK
+    if not events:
+        _out("还没有流水。")
+        return EXIT_OK
+    rows = [
+        [e.ts, e.host + ("/" + e.deployment if e.deployment else ""), e.kind,
+         "成功" if e.ok else "失败", e.detail[:60]]
+        for e in events
+    ]
+    _out(_table(rows, ["时间", "目标", "动作", "结果", "说明"]))
     return EXIT_OK
 
 
@@ -457,6 +571,8 @@ def cmd_ext_rm(args: argparse.Namespace) -> int:
 def cmd_ext_apply(args: argparse.Namespace) -> int:
     ops = _ext(args)
     changes = ops.apply(names=args.only or None, restart=not args.no_restart)
+    _record(ops.dep, "ext-apply", ok=True,
+            detail=f"{sum(1 for c in changes if c.updated)}/{len(changes)} 个 profile 有改动")
     if args.json:
         _dump([
             {"id": c.id, "name": c.name, "updated": c.updated, "stopped": c.stopped,
@@ -594,7 +710,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
 def _target_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     g = p.add_argument_group("目标机")
-    g.add_argument("--host", metavar="NAME", help="~/.sleight/hosts.toml 里配好的主机")
+    g.add_argument("--host", metavar="NAME[/部署名]",
+                   help="本地库里配好的目标。一台机跑多个 Manager 时用 主机/部署名")
     g.add_argument("--ssh", metavar="USER@HOST", help="直接给 ssh 目标（不写 = 本机）")
     g.add_argument("--ssh-port", type=int, metavar="N", help="SSH 端口")
     g.add_argument("--identity", metavar="PATH", help="SSH 私钥")
@@ -692,13 +809,39 @@ def build_parser() -> argparse.ArgumentParser:
     hsub = p.add_subparsers(dest="hosts_command", metavar="<子命令>")
     hp = hsub.add_parser("ls", help="列出配好的主机")
     hp.set_defaults(func=cmd_hosts_ls)
-    hp = hsub.add_parser("add", help="记一台主机", parents=[target, spec])
+    hp = hsub.add_parser("add", help="记一台主机（顺带建一个 default 部署）",
+                         parents=[target, spec])
     hp.add_argument("name", help="起个名字，之后 --host 用它")
+    hp.add_argument("--notes", metavar="TEXT", help="备注，比如「香港那台」")
     hp.set_defaults(func=cmd_hosts_add)
-    hp = hsub.add_parser("rm", help="从清单里删掉（不动目标机）")
+    hp = hsub.add_parser("rm", help="从库里删掉（不动目标机）")
     hp.add_argument("name")
     hp.set_defaults(func=cmd_hosts_rm)
     p.set_defaults(func=lambda a: (_err("用 sleight hosts ls|add|rm"), EXIT_USAGE)[1])
+
+    # —— 部署记录 ——
+    p = add("deployments", "一台主机上的 N 个 Manager")
+    dsub = p.add_subparsers(dest="deployments_command", metavar="<子命令>")
+    dp = dsub.add_parser("ls", help="列出全部部署记录")
+    dp.add_argument("--only-host", metavar="NAME", help="只看这台机的")
+    dp.set_defaults(func=cmd_deployments_ls)
+    dp = dsub.add_parser("add", help="在一台机上再记一个 Manager", parents=[spec])
+    dp.add_argument("host_name", metavar="HOST", help="哪台主机（要先 hosts add 过）")
+    dp.add_argument("name", help="这个 Manager 的名字，比如 second")
+    # --dir 平时住在"目标机"那组里（临时目标也要用），这里得单独给一份
+    dp.add_argument("--dir", metavar="PATH",
+                    help=f"部署目录，同一台机上不能和别的部署重（默认 {DeploySpec().dir}）")
+    dp.set_defaults(func=cmd_deployments_add)
+    dp = dsub.add_parser("rm", help="删掉一条记录（不动目标机）")
+    dp.add_argument("ref", metavar="HOST/NAME")
+    dp.set_defaults(func=cmd_deployments_rm)
+    p.set_defaults(func=lambda a: (_err("用 sleight deployments ls|add|rm"), EXIT_USAGE)[1])
+
+    # —— 流水 ——
+    p = add("history", "看部署/备份/升级/销毁的流水")
+    p.add_argument("--only-host", metavar="NAME", help="只看这台机的")
+    p.add_argument("-n", "--limit", type=int, default=30, metavar="N")
+    p.set_defaults(func=cmd_history)
 
     # —— 插件 ——
     p = add("ext", "浏览器插件的推送、下发与验证")

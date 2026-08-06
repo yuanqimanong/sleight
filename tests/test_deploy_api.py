@@ -170,8 +170,10 @@ def test_add_list_delete(client):
     names = [h["name"] for h in client.get("/api/hosts").json()]
     assert "hk-01" in names
     entry = next(h for h in client.get("/api/hosts").json() if h["name"] == "hk-01")
-    assert entry["spec"]["port"] == 9100
     assert entry["sudo"] is True
+    # spec 现在挂在部署下面 —— 一台机可以有好几个 Manager
+    assert entry["deployments"][0]["spec"]["port"] == 9100
+    assert entry["deployments"][0]["name"] == "default"
 
     assert client.delete("/api/hosts/hk-01").status_code == 200
     assert "hk-01" not in [h["name"] for h in client.get("/api/hosts").json()]

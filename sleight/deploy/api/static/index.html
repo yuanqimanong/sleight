@@ -87,12 +87,24 @@
       <summary class="dim" style="cursor:pointer;font-size:12.5px">加一台</summary>
       <label>名字</label><input id="h_name" placeholder="hk-01">
       <label>SSH（留空 = 本机）</label><input id="h_ssh" placeholder="deploy@1.2.3.4">
-      <label>SSH 端口</label><input id="h_port" placeholder="22">
+      <label>SSH 端口</label><input id="h_sshport" placeholder="22">
       <label>私钥</label><input id="h_key" placeholder="~/.ssh/id_ed25519">
       <label>部署目录</label><input id="h_dir">
+      <label>Manager 端口</label><input id="h_port" placeholder="9000">
+      <label>备注</label><input id="h_notes" placeholder="香港那台">
       <label><input type="checkbox" id="h_sudo" style="width:auto"> 用 sudo -n 建目录</label>
       <label><input type="checkbox" id="h_new" style="width:auto"> 首次连接信任指纹</label>
       <div class="row"><button class="go" id="h_add">保存</button></div>
+    </details>
+    <details style="margin-top:8px">
+      <summary class="dim" style="cursor:pointer;font-size:12.5px">在已有主机上再加一个 Manager</summary>
+      <label>主机</label><input id="d_host" placeholder="hk-01">
+      <label>这个 Manager 的名字</label><input id="d_name" placeholder="second">
+      <label>部署目录（不能和同机其它部署重）</label><input id="d_dir2">
+      <label>端口</label><input id="d_port2" placeholder="9001">
+      <div class="row"><button class="go" id="d_add">保存</button></div>
+      <div class="note">项目名和容器名会自动按这个名字加后缀 —— 不加的话第二个
+        Manager 会把第一个的容器删掉。</div>
     </details>
   </aside>
 
@@ -137,26 +149,71 @@ function fail(e) { log("✗ " + e.message, "bad"); }
 /* ---------- 主机 ---------- */
 async function loadHosts() {
   HOSTS = await api("/api/hosts");
-  $("hosts").innerHTML = HOSTS.map((h) => `
-    <button class="host ${CUR === h.name ? "on" : ""}" data-h="${esc(h.name)}">
-      <b>${esc(h.name)}${h.implicit ? ' <span class="pill">本机</span>' : ""}</b>
-      <span>${esc(h.ssh || "本机")} · ${esc(h.spec.dir)}:${h.spec.port}</span>
-    </button>`).join("");
+  // 一台主机可以跑多个 Manager，所以侧栏选的是"部署"（主机/部署名）而不是主机
+  $("hosts").innerHTML = HOSTS.map((h) => {
+    const items = (h.deployments || []).map((d) => `
+      <button class="host ${CUR === d.ref ? "on" : ""}" data-h="${esc(d.ref)}">
+        <b>${esc(d.ref)}${h.implicit ? ' <span class="pill">本机</span>' : ""}</b>
+        <span>${esc(h.ssh || "本机")} · ${esc(d.spec.dir)}:${d.spec.port}</span>
+        <span class="dim">${d.deployed_at ? "部署于 " + esc(d.deployed_at) : "从未部署"}</span>
+      </button>`).join("");
+    return items || `
+      <button class="host" data-h="${esc(h.name)}">
+        <b>${esc(h.name)}</b><span class="dim">还没有 Manager</span>
+      </button>`;
+  }).join("");
   $("hosts").querySelectorAll("[data-h]").forEach((b) =>
     b.onclick = () => { CUR = b.dataset.h; loadHosts(); render(); });
-  if (!CUR && HOSTS.length) { CUR = HOSTS[0].name; loadHosts(); render(); }
+  if (!CUR && HOSTS.length) {
+    const first = HOSTS.find((h) => (h.deployments || []).length);
+    CUR = first ? first.deployments[0].ref : HOSTS[0].name;
+    loadHosts(); render();
+  }
+}
+
+/* 当前选中的部署 → 接口 URL。部署名走查询参数，路径参数不匹配斜杠 */
+function url(suffix, extra) {
+  const [h, d] = CUR.split("/");
+  const params = new URLSearchParams(extra || {});
+  if (d) params.set("deployment", d);
+  const query = params.toString();
+  return `/api/hosts/${encodeURIComponent(h)}${suffix}${query ? "?" + query : ""}`;
+}
+
+/* 当前选中的那条部署记录 */
+function entry() {
+  for (const h of HOSTS) for (const d of h.deployments || []) if (d.ref === CUR) return d;
+  return null;
 }
 $("h_add").onclick = async () => {
   try {
     await api("/api/hosts", { method: "POST", body: {
       name: $("h_name").value.trim(), ssh: $("h_ssh").value.trim(),
-      port: $("h_port").value ? Number($("h_port").value) : null,
+      port: $("h_sshport").value ? Number($("h_sshport").value) : null,
       identity: $("h_key").value.trim(), sudo: $("h_sudo").checked,
-      accept_new: $("h_new").checked,
-      deploy: $("h_dir").value.trim() ? { dir: $("h_dir").value.trim() } : {},
+      accept_new: $("h_new").checked, notes: $("h_notes").value.trim(),
+      deploy: {
+        ...($("h_dir").value.trim() ? { dir: $("h_dir").value.trim() } : {}),
+        ...($("h_port").value ? { port: Number($("h_port").value) } : {}),
+      },
     }});
-    log("已保存到 hosts.toml", "ok");
-    CUR = $("h_name").value.trim();
+    log("已保存到本地库", "ok");
+    CUR = $("h_name").value.trim() + "/default";
+    await loadHosts(); render();
+  } catch (e) { fail(e); }
+};
+
+$("d_add").onclick = async () => {
+  try {
+    await api("/api/deployments", { method: "POST", body: {
+      host: $("d_host").value.trim(), name: $("d_name").value.trim(),
+      spec: {
+        ...($("d_dir2").value.trim() ? { dir: $("d_dir2").value.trim() } : {}),
+        ...($("d_port2").value ? { port: Number($("d_port2").value) } : {}),
+      },
+    }});
+    log("已加入本地库", "ok");
+    CUR = `${$("d_host").value.trim()}/${$("d_name").value.trim()}`;
     await loadHosts(); render();
   } catch (e) { fail(e); }
 };
@@ -192,13 +249,13 @@ function render() {
   if (!CUR) { $("view").innerHTML = `<div class="card dim">左边选一台目标机。</div>`; return; }
   ({ overview: viewOverview, deploy: viewDeploy, profiles: viewProfiles, ext: viewExt })[TAB]();
 }
-const host = () => HOSTS.find((h) => h.name === CUR) || { spec: {} };
+const host = () => entry() || { spec: {} };
 
 /* —— 概览 —— */
 async function viewOverview() {
   $("view").innerHTML = `<div class="card dim">读取状态…</div>`;
   try {
-    const s = await api(`/api/hosts/${CUR}/status`);
+    const s = await api(url("/status"));
     const c = s.container, a = s.api || {};
     const cls = c.status === "running" ? "ok" : c.status === "absent" ? "dim" : "bad";
     $("view").innerHTML = `
@@ -217,16 +274,28 @@ async function viewOverview() {
         <div class="row">
           <button class="mini" id="b_logs">看日志</button>
           <button class="mini" id="b_backup">停机备份</button>
+          <button class="mini" id="b_hist">流水</button>
           <button class="mini" id="b_reload">刷新</button>
         </div>
         <div class="note">备份要停机 —— 在线复制 SQLite 会拿到和浏览器用户目录不一致的时间点。</div>
       </div>`;
     $("b_reload").onclick = viewOverview;
-    $("b_backup").onclick = () => { clearLog(); job(`/api/hosts/${CUR}/backup`, {},
+    $("b_hist").onclick = async () => {
+      clearLog();
+      try {
+        const host = CUR.split("/")[0];
+        const rows = await api(`/api/events?host=${encodeURIComponent(host)}&limit=30`);
+        if (!rows.length) return log("还没有流水。", "dim");
+        rows.forEach((e) => log(
+          `${e.ts}  ${e.host}${e.deployment ? "/" + e.deployment : ""}  ${e.kind}  ` +
+          `${e.ok ? "成功" : "失败"}  ${e.detail || ""}`, e.ok ? "" : "bad"));
+      } catch (e) { fail(e); }
+    };
+    $("b_backup").onclick = () => { clearLog(); job(url("/backup"), {},
       (r) => log("归档 " + r.archive, "ok")); };
     $("b_logs").onclick = async () => {
       clearLog(); log("读取日志…", "dim");
-      try { const r = await api(`/api/hosts/${CUR}/logs?tail=200`); clearLog(); log(r.text); }
+      try { const r = await api(url("/logs", { tail: 200 })); clearLog(); log(r.text); }
       catch (e) { fail(e); }
     };
   } catch (e) {
@@ -266,7 +335,7 @@ function viewDeploy() {
   $("d_pre").onclick = async () => {
     $("pre").innerHTML = `<div class="card dim">体检中…</div>`;
     try {
-      const p = await api(`/api/hosts/${CUR}/preflight`, { method: "POST", body: { spec: spec() } });
+      const p = await api(url("/preflight"), { method: "POST", body: { spec: spec() } });
       const mark = { ok: ["✓", "ok"], warn: ["!", "warn"], fail: ["✗", "bad"] };
       $("pre").innerHTML = `
         <div class="card">
@@ -291,7 +360,7 @@ function viewDeploy() {
   };
   $("d_go").onclick = () => {
     clearLog(); log("开始部署，拉镜像可能要几分钟…", "dim");
-    job(`/api/hosts/${CUR}/deploy`, { spec: spec() }, (r) => {
+    job(url("/deploy"), { spec: spec() }, (r) => {
       log(r.summary, "ok");
       log(`地址 ${r.url}   token 前缀 ${r.token_hint}（完整值在目标机 ${r.env_path}，权限 600）`);
       log(`取回完整 token：sleight token --host ${CUR}`, "dim");
@@ -304,7 +373,7 @@ function viewDeploy() {
 async function viewProfiles() {
   $("view").innerHTML = `<div class="card dim">读取 profile…（远程会临时开一条 SSH 隧道）</div>`;
   try {
-    const ps = await api(`/api/hosts/${CUR}/profiles`);
+    const ps = await api(url("/profiles"));
     $("view").innerHTML = `
       <div class="card">
         <div class="scroll"><table>
@@ -330,14 +399,14 @@ async function viewProfiles() {
     $("view").querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
       clearLog();
       try {
-        await api(`/api/hosts/${CUR}/profiles/${b.dataset.p}/${b.dataset.a}`, { method: "POST" });
+        await api(url(`/profiles/${b.dataset.p}/${b.dataset.a}`), { method: "POST" });
         log("完成", "ok"); viewProfiles();
       } catch (e) { fail(e); }
     });
     $("p_stopall").onclick = async () => {
       clearLog();
       try {
-        const r = await api(`/api/hosts/${CUR}/profiles/-/stop-all`, { method: "POST" });
+        const r = await api(url("/profiles/-/stop-all"), { method: "POST" });
         log(`停了 ${r.stopped.length} 个`, "ok"); viewProfiles();
       } catch (e) { fail(e); }
     };
@@ -348,7 +417,7 @@ async function viewProfiles() {
 async function viewExt() {
   $("view").innerHTML = `<div class="card dim">读取插件…</div>`;
   try {
-    const exts = await api(`/api/hosts/${CUR}/extensions`);
+    const exts = await api(url("/extensions"));
     $("view").innerHTML = `
       <div class="card">
         <h2>目标机上装了什么</h2>
@@ -382,22 +451,22 @@ async function viewExt() {
       </div>
       <div id="x_out"></div>`;
     $("x_push").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/push`,
+      job(url("/extensions/push"),
           { path: $("x_path").value.trim(), as: $("x_as").value.trim() || null },
           () => viewExt()); };
     $("x_apply").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/apply`, { restart: true }, (rows) => {
+      job(url("/extensions/apply"), { restart: true }, (rows) => {
         const n = rows.filter((r) => r.updated).length;
         log(`${n}/${rows.length} 个 profile 有改动`, n ? "ok" : "dim");
         rows.forEach((r) => log("  " + r.summary));
       }); };
     $("x_verify").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/verify`, { launch: true }, (rows) =>
+      job(url("/extensions/verify"), { launch: true }, (rows) =>
         rows.forEach((r) => log(r.summary, r.ok ? "ok" : "bad"))); };
     $("x_drift").onclick = async () => {
       $("x_out").innerHTML = `<div class="card dim">比对中…</div>`;
       try {
-        const d = await api(`/api/hosts/${CUR}/extensions/drift`);
+        const d = await api(url("/extensions/drift"));
         $("x_out").innerHTML = `<div class="card">
           <h2>漂移</h2>
           <div class="scroll"><table>
