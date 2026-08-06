@@ -400,6 +400,68 @@ def create_app(*, token: str | None = None) -> Any:
 
         return {"job": jobs.start("upgrade", name, work).id}
 
+    @app.get("/api/hosts/{name}/token")
+    def token_of(name: str, deployment: str | None = None) -> dict[str, Any]:
+        """取回完整的 AUTH_TOKEN。
+
+        它就在目标机的 ``.env``（600）里，能操作这个界面的人本来就能 SSH 上去读到。
+        Manager 的 Web UI 要用它 —— 那边没有用户名密码，token 就是唯一凭据。
+        """
+        dep, _ = deployer(_ref(name, deployment))
+        value = wrap(dep.existing_token)
+        if not value:
+            raise HTTPException(
+                status_code=404, detail=f"{dep.spec.env_path} 里没有 AUTH_TOKEN，还没部署过？"
+            )
+        return {"token": value, "url": dep.spec.local_url, "env_path": dep.spec.env_path}
+
+    @app.post("/api/hosts/{name}/rollback")
+    def rollback(name: str, deployment: str | None = None) -> dict[str, Any]:
+        ref = _ref(name, deployment)
+
+        def work(say: Callable[[str], None]) -> dict[str, Any]:
+            dep, entry = deployer(ref, on_progress=say)
+            result = dep.rollback()
+            record(entry, "rollback", ok=True, image=dep.spec.image, status=result.status,
+                   detail=f"→ {dep.spec.image}")
+            return {"summary": result.summary, "status": result.status}
+
+        return {"job": jobs.start("rollback", ref, work).id}
+
+    @app.post("/api/hosts/{name}/destroy")
+    def destroy(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """停并删容器。``purge_data`` 要额外把部署名原样打一遍才认。
+
+        删 ``data/`` 是不可逆的：profile 数据库、指纹种子、Cookie 和全部登录态都在
+        里面。命令行那边要 ``--purge-data --yes``，界面这边就得打字确认 —— 一个能被
+        误点的按钮不该有这种后果。
+        """
+        ref = _ref(name, deployment)
+        purge = bool(body.get("purge_data"))
+        if purge:
+            # 比对**解析之后**的 host/deployment，不是调用方随手写的那串 ——
+            # 确认的是"要销毁哪个东西"，不该取决于你怎么寻址它
+            _, entry = _entry(ref)
+            if str(body.get("confirm") or "") != entry.ref:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"要删 data/ 就把 {entry.ref!r} 原样打一遍 —— "
+                        "登录态和 profile 删了回不来"
+                    ),
+                )
+
+        def work(say: Callable[[str], None]) -> dict[str, Any]:
+            dep, entry = deployer(ref, on_progress=say)
+            dep.destroy(purge_data=purge)
+            record(entry, "destroy", ok=True,
+                   detail="连 data/ 一起删" if purge else "保留 data/")
+            return {"purged": purge}
+
+        return {"job": jobs.start("destroy", ref, work).id}
+
     @app.post("/api/hosts/{name}/backup")
     def backup(name: str, deployment: str | None = None) -> dict[str, Any]:
         ref = _ref(name, deployment)

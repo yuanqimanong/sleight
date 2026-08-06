@@ -306,3 +306,76 @@ def test_extension_push_needs_a_path(client):
 
 def test_unknown_profile_action_is_a_400(client):
     assert client.post("/api/hosts/local/profiles/x/frobnicate").status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# 界面上的运维与危险动作
+# --------------------------------------------------------------------------- #
+
+
+def test_token_is_retrievable_through_the_ui(client, monkeypatch):
+    """Manager 没有用户名密码，token 就是唯一凭据 —— 界面上得能拿到。"""
+    monkeypatch.setattr(StubDeployer, "existing_token", lambda self: "t" * 64, raising=False)
+    body = client.get("/api/hosts/local/token").json()
+    assert body["token"] == "t" * 64
+    assert body["env_path"].endswith("/.env")
+
+
+def test_a_deployment_with_no_token_is_a_404(client, monkeypatch):
+    monkeypatch.setattr(StubDeployer, "existing_token", lambda self: None, raising=False)
+    assert client.get("/api/hosts/local/token").status_code == 404
+
+
+def test_rollback_is_a_job(client, monkeypatch):
+    monkeypatch.setattr(
+        StubDeployer, "rollback",
+        lambda self: (self._do("rollback"), DeployResult(self.spec, "t", True, [], {}))[1],
+        raising=False,
+    )
+    job = wait_job(client, client.post("/api/hosts/local/rollback").json()["job"])
+    assert job["status"] == "ok"
+    assert StubDeployer.instances[-1].calls == ["rollback"]
+
+
+def test_destroy_keeps_data_by_default(client, monkeypatch):
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        StubDeployer, "destroy",
+        lambda self, purge_data=False: seen.append(purge_data), raising=False,
+    )
+    job = wait_job(client, client.post("/api/hosts/local/destroy", json={}).json()["job"])
+    assert job["status"] == "ok"
+    assert seen == [False]
+
+
+def test_purging_data_needs_the_ref_typed_out(client, monkeypatch):
+    """一个能被误点的按钮不该能删掉全部登录态。"""
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        StubDeployer, "destroy",
+        lambda self, purge_data=False: seen.append(purge_data), raising=False,
+    )
+    refused = client.post("/api/hosts/local/destroy", json={"purge_data": True})
+    assert refused.status_code == 400
+    assert "原样打一遍" in refused.json()["detail"]
+
+    # 确认串比对的是解析之后的 host/deployment，不管你怎么寻址它
+    wrong = client.post("/api/hosts/local/destroy",
+                        json={"purge_data": True, "confirm": "local"})
+    assert wrong.status_code == 400
+    assert "local/default" in wrong.json()["detail"]
+    assert seen == [], "确认没通过就一次都不该执行"
+
+    ok = client.post("/api/hosts/local/destroy",
+                     json={"purge_data": True, "confirm": "local/default"})
+    assert wait_job(client, ok.json()["job"])["status"] == "ok"
+    assert seen == [True]
+
+
+def test_deleting_a_deployment_leaves_the_target_alone(client):
+    client.post("/api/hosts", json={"name": "h", "ssh": "u@x", "deploy": {"dir": "/srv/a"}})
+    client.post("/api/deployments",
+                json={"host": "h", "name": "second", "spec": {"dir": "/srv/b", "port": 9001}})
+    assert client.delete("/api/deployments/h/second").status_code == 200
+    assert [d["name"] for d in client.get("/api/deployments?host=h").json()] == ["default"]
+    assert StubDeployer.instances == [], "删记录不该碰目标机"

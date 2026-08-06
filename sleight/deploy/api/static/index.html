@@ -273,13 +273,93 @@ async function viewOverview() {
         </table>
         <div class="row">
           <button class="mini" id="b_logs">看日志</button>
-          <button class="mini" id="b_backup">停机备份</button>
+          <button class="mini" id="b_token">显示 token</button>
           <button class="mini" id="b_hist">流水</button>
           <button class="mini" id="b_reload">刷新</button>
         </div>
-        <div class="note">备份要停机 —— 在线复制 SQLite 会拿到和浏览器用户目录不一致的时间点。</div>
+      </div>
+      <div class="card">
+        <h2>运维</h2>
+        <div class="row">
+          <button class="mini" id="b_backup">停机备份</button>
+          <input id="b_image" placeholder="cloakhq/cloakbrowser-manager:v0.0.11"
+                 style="flex:1;min-width:220px">
+          <button class="mini" id="b_upgrade">升级到这个镜像</button>
+          <button class="mini" id="b_rollback">回滚上一个</button>
+        </div>
+        <div class="note">备份要停机 —— 在线复制 SQLite 会拿到和浏览器用户目录不一致的
+          时间点。升级默认先备份；回滚用的是状态文件里记着的上一个镜像。</div>
+      </div>
+      <div class="card">
+        <h2>危险动作</h2>
+        <div class="row">
+          <button class="go danger" id="b_destroy">停并删容器（保留 data/）</button>
+        </div>
+        <div class="row">
+          <input id="b_confirm" placeholder="要连 data/ 一起删，把 ${esc(CUR)} 原样打在这里"
+                 style="flex:1;min-width:260px">
+          <button class="go danger" id="b_purge">连 data/ 一起删</button>
+        </div>
+        <div class="note">删 data/ 不可逆：profile 数据库、指纹种子、Cookie 和全部登录态
+          都在里面。删容器本身不会丢这些。</div>
+      </div>
+      <div class="card">
+        <h2>这条记录</h2>
+        <div class="row">
+          <button class="mini" id="b_rmdepl">从库里删掉这个部署</button>
+          <button class="mini" id="b_rmhost">删掉整台主机及其全部部署</button>
+        </div>
+        <div class="note">只动本地库，**目标机上的东西一点不碰**。要真的拆掉 Manager
+          请先用上面的"危险动作"。</div>
       </div>`;
     $("b_reload").onclick = viewOverview;
+    $("b_token").onclick = async () => {
+      clearLog();
+      try {
+        const t = await api(url("/token"));
+        log("AUTH_TOKEN  " + t.token, "ok");
+        log("目标机上    " + t.url + "   （远程的话先 sleight tunnel）");
+        log("它存在      " + t.env_path + "（权限 600）");
+        log("Manager 没有用户名密码 —— 这个 token 就是唯一凭据。", "dim");
+      } catch (e) { fail(e); }
+    };
+    $("b_upgrade").onclick = () => {
+      const image = $("b_image").value.trim();
+      if (!image) return fail(new Error("先填要升级到的镜像"));
+      clearLog(); log("升级前会先做一次停机备份…", "dim");
+      job(url("/upgrade"), { image, backup: true }, (r) => log(r.summary, "ok"));
+    };
+    $("b_rollback").onclick = () => {
+      clearLog();
+      job(url("/rollback"), {}, (r) => log(r.summary, "ok"));
+    };
+    $("b_destroy").onclick = () => {
+      clearLog();
+      job(url("/destroy"), { purge_data: false }, () => { log("容器已删，data/ 保留", "ok"); viewOverview(); });
+    };
+    $("b_purge").onclick = () => {
+      clearLog();
+      job(url("/destroy"), { purge_data: true, confirm: $("b_confirm").value.trim() },
+          () => { log("容器和 data/ 都删了", "bad"); viewOverview(); });
+    };
+    $("b_rmdepl").onclick = async () => {
+      clearLog();
+      const [h, d] = CUR.split("/");
+      try {
+        await api(`/api/deployments/${encodeURIComponent(h)}/${encodeURIComponent(d || "default")}`,
+                  { method: "DELETE" });
+        log("已从库里删掉（目标机没动）", "ok");
+        CUR = null; await loadHosts(); render();
+      } catch (e) { fail(e); }
+    };
+    $("b_rmhost").onclick = async () => {
+      clearLog();
+      try {
+        await api(`/api/hosts/${encodeURIComponent(CUR.split("/")[0])}`, { method: "DELETE" });
+        log("整台主机的记录都删了（目标机没动）", "ok");
+        CUR = null; await loadHosts(); render();
+      } catch (e) { fail(e); }
+    };
     $("b_hist").onclick = async () => {
       clearLog();
       try {
