@@ -381,3 +381,64 @@ def test_the_whole_package_compiles_without_warnings():
             for w in caught
         ]
     assert not problems, "\n".join(problems)
+
+
+def test_the_tunnel_never_shares_the_multiplexed_connection(monkeypatch):
+    """隧道必须独占一条连接。
+
+    走复用的话，master 已经存在时这条 `ssh -N -L` 只是个 slave：它把转发请求交给
+    master 之后**立刻 exit 0**，于是"进程还活着"不再等价于"隧道还在"（我们就是这么
+    误判成失败的）；而且转发归 master 所有，terminate() 拆不掉，会一直漏到 master
+    过期。这条只有连真机才会暴露 —— 打了桩的 Popen 里没有 master。
+    """
+    captured: list[list[str]] = []
+
+    class FakeProc:
+        """像真进程一样：terminate() 之后就死掉，否则 tunnel() 会走到 kill()。"""
+
+        returncode = None
+        stderr = None
+
+        def __init__(self, argv, **kw):
+            captured.append(list(argv))
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+
+        def terminate(self):
+            self.alive = False
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(runner_mod, "_wait_port", lambda *a, **kw: None)
+
+    with SSHRunner("deploy@host").tunnel(9000):
+        pass
+
+    argv = captured[0]
+    assert "ControlPath=none" in argv
+    assert "ControlMaster=auto" not in argv
+    assert "-N" in argv and "ExitOnForwardFailure=yes" in argv
+    assert any(a.startswith("127.0.0.1:") and a.endswith(":127.0.0.1:9000") for a in argv)
+
+
+def test_wait_port_accepts_a_live_port_even_if_the_process_died(monkeypatch):
+    """先探端口再判进程死活 —— 顺序反了会把"已经通了"误判成失败。"""
+    import socket as socket_mod
+
+    with socket_mod.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        class DeadProc:
+            returncode = 0
+            stderr = None
+
+            def poll(self):
+                return 0
+
+        runner_mod._wait_port(port, DeadProc(), timeout=2.0)      # 不该抛
