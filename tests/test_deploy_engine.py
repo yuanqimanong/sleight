@@ -534,3 +534,44 @@ def test_a_no_op_redeploy_stays_quiet():
     dep.apply()
     assert not any("提醒" in line for line in lines)
     assert any("已经是这个状态" in line for line in lines)
+
+
+# --------------------------------------------------------------------------- #
+# 拉镜像：尽力而为，不是必须成功
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_pull_is_survivable_when_the_image_is_already_there():
+    """内网/离线的目标机连不上 registry 很常见，而镜像可能是 docker load 进去的。
+
+    真机上就是这么炸的：镜像明明在目标机上，pull 失败却把整个部署挡死了。
+    """
+    dep, runner = make(replies={
+        "docker image inspect": (0, "sha256:cafe"),
+        "docker compose pull": (1, 'Get "https://registry-1.docker.io/v2/": timeout'),
+    })
+    lines: list[str] = []
+    dep._on_progress = lines.append
+    result = dep.apply()
+    assert result.changed
+    assert runner.ran("docker", "compose", "up", "-d")
+    assert any("就用本地那份" in line for line in lines)
+
+
+def test_a_failed_pull_without_a_local_image_stops_and_says_how_to_get_it_there():
+    dep, runner = make(replies={
+        "docker image inspect": (1, ""),
+        "docker compose pull": (1, 'Get "https://registry-1.docker.io/v2/": timeout'),
+    })
+    with pytest.raises(DeployError, match="docker save") as exc:
+        dep.apply()
+    assert "registry-1.docker.io" in str(exc.value)
+    assert not runner.ran("docker", "compose", "up", "-d")
+
+
+def test_a_successful_pull_says_nothing_extra():
+    dep, _ = make()
+    lines: list[str] = []
+    dep._on_progress = lines.append
+    dep.apply()
+    assert not any("就用本地那份" in line for line in lines)

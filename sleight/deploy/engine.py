@@ -153,10 +153,13 @@ class Deployer:
         """``docker compose`` 命令。工作目录是部署目录，``.env`` 因此会被自动读取。"""
         return ["docker", "compose", *args]
 
-    def _compose(self, *args: str, timeout: float | None = None, mutate: bool = True) -> CommandResult:
+    def _compose(
+        self, *args: str, timeout: float | None = None, mutate: bool = True, check: bool = True
+    ) -> CommandResult:
         argv = self.compose_argv(*args)
-        call = self.mutate if mutate else self.probe
-        return call(argv, cwd=self.spec.dir, timeout=timeout)
+        if not mutate:
+            return self.probe(argv, cwd=self.spec.dir, timeout=timeout)
+        return self.mutate(argv, cwd=self.spec.dir, timeout=timeout, check=check)
 
     # ------------------------------------------------------------------ #
     # 目标机现状
@@ -334,8 +337,7 @@ class Deployer:
             return DeployResult(self.spec, token, False, self.steps, self.api_status())
 
         if pull:
-            self.say(f"拉镜像 {self.spec.image}（可能要几分钟）")
-            self._compose("pull", "manager", timeout=PULL_TIMEOUT).check()
+            self._pull()
 
         up = ["up", "-d"]
         if force_recreate:
@@ -347,6 +349,32 @@ class Deployer:
         if wait and not self.dry_run:
             status = self.wait_healthy()
         return DeployResult(self.spec, token, True, self.steps, status)
+
+    def _pull(self) -> None:
+        """拉镜像。**目标机上已经有这个镜像的话，拉失败不算致命。**
+
+        pull 的语义是"尽力刷新"，不是"必须成功"。目标机连不上 registry 是很常见的
+        （内网、离线、daemon 没配代理），而镜像可能是 ``docker load`` 进去的 —— 那种
+        情况下让 pull 把整个部署挡死毫无道理。本地**没有**这个镜像时才是真的走不下去。
+        """
+        have_local = self.probe(
+            ["docker", "image", "inspect", self.spec.image, "--format", "{{.Id}}"]
+        ).ok
+        self.say(f"拉镜像 {self.spec.image}（可能要几分钟）")
+        result = self._compose("pull", "manager", timeout=PULL_TIMEOUT, check=False)
+        if result.ok:
+            return
+        reason = (result.err.strip() or result.out.strip() or "(no output)").splitlines()[-1]
+        if have_local:
+            self.say(f"拉不动（{reason}），但目标机上已经有这个镜像，就用本地那份")
+            return
+        raise DeployError(
+            f"目标机上没有 {self.spec.image}，而且拉不下来：\n  {reason}\n"
+            "  如果目标机本来就上不了 registry，可以先把镜像送过去：\n"
+            f"    docker save {self.spec.image} | ssh <目标机> docker load\n"
+            "  然后重跑（sleight 会认出镜像已在本地）。daemon 没配代理的话，"
+            "sleight preflight 会指出来。"
+        )
 
     def _ensure_dirs(self) -> None:
         """建部署目录。

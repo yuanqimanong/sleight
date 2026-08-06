@@ -27,9 +27,10 @@ from typing import Any
 from ...core.errors import SleightError
 from ..engine import Deployer
 from ..errors import DeployError
-from ..inventory import Host, Inventory
 from ..ops import ExtensionOps, ProfileOps, extension_paths
+from ..presets import DEPLOY_TEMPLATES, FIELD_HELP, PROFILE_PRESETS, profile_spec_from
 from ..spec import DEFAULT_IMAGE, DeploySpec
+from ..store import Deployment, Host, Store
 
 log = logging.getLogger("sleight.deploy.api")
 
@@ -174,24 +175,53 @@ def create_app(*, token: str | None = None) -> Any:
 
     # ---------------------------------------------------------------- #
 
+    def store() -> Store:
+        return Store()
+
+    def _ref(name: str, deployment: str | None) -> str:
+        """``主机`` + 可选部署名 → ``主机/部署名``。
+
+        部署名走**查询参数**而不是路径段：路径参数不匹配斜杠，``local/default``
+        塞进 ``/api/hosts/{name}/status`` 会直接 404。
+        """
+        return f"{name}/{deployment}" if deployment else name
+
+    def _entry(ref: str) -> tuple[Host, Deployment]:
+        """``主机`` 或 ``主机/部署名`` → (主机, 部署记录)。
+
+        界面里那个"本机"是虚拟列出来的，头一次真对它动手时才落库 —— 否则每个操作
+        都会因为"库里没这条"而 404。
+        """
+        db = store()
+        if ref.split("/")[0] == "local" and db.get_host("local") is None:
+            db.ensure_local()
+        try:
+            deployment = db.resolve(ref)
+            return db.require_host(deployment.host), deployment
+        except DeployError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     def deployer(
-        name: str,
+        ref: str,
         *,
         on_progress: Callable[[str], None] | None = None,
         **overrides: Any,
-    ) -> Deployer:
-        host = _host(name)
-        spec = host.spec(**{k: v for k, v in overrides.items() if v is not None})
-        return Deployer(spec, host.runner(), sudo=host.sudo, on_progress=on_progress)
+    ) -> tuple[Deployer, Deployment]:
+        host, deployment = _entry(ref)
+        spec = deployment.spec.replace(**{k: v for k, v in overrides.items() if v is not None})
+        dep = Deployer(spec, host.runner(), sudo=host.sudo, on_progress=on_progress)
+        return dep, deployment
 
-    def _host(name: str) -> Host:
-        if name == "local":
-            inv = Inventory.load()
-            return inv.hosts.get("local") or Host(name="local")
+    def record(deployment: Deployment, kind: str, *, ok: bool, detail: str = "",
+               image: str = "", status: dict[str, Any] | None = None) -> None:
+        """把动作记进库。**永远不抛** —— 记不上账不该让成功的动作变成失败。"""
         try:
-            return Inventory.load().get(name)
-        except DeployError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            db = store()
+            if ok and image:
+                db.record_deploy(deployment.host, deployment.name, image=image, status=status or {})
+            db.log_event(deployment.host, kind, ok=ok, deployment=deployment.name, detail=detail)
+        except Exception:                                  # 记账不该阻断
+            log.debug("记流水失败", exc_info=True)
 
     def wrap(fn: Callable[[], Any]) -> Any:
         """把库里的异常翻成 HTTP 错误，而不是 500 + 一页 traceback。"""
@@ -217,65 +247,143 @@ def create_app(*, token: str | None = None) -> Any:
             "default_image": DEFAULT_IMAGE,
             "spec": asdict(DeploySpec()),
             "auth": bool(token),
+            # 模板和字段解释只在后端定义一份，前端渲染它
+            "deploy_templates": [t.to_dict() for t in DEPLOY_TEMPLATES],
+            "profile_presets": [p.to_dict() for p in PROFILE_PRESETS],
+            "help": {k: v.to_dict() for k, v in FIELD_HELP.items()},
         }
 
     # ---------------------------------------------------------------- #
     # 主机
     # ---------------------------------------------------------------- #
 
+    @app.post("/api/probe")
+    def probe_host(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """**保存之前**先测一下这台机连不连得上、有没有 docker。
+
+        引导流程要的就是这个：填完连接信息立刻能验证，而不是保存了、部署了、
+        等超时了才发现 key 不对。所以它不碰库，也不需要先有主机记录。
+        """
+        host = Host(
+            name="probe",
+            ssh=str(body.get("ssh") or ""),
+            port=int(body["port"]) if body.get("port") else None,
+            identity=str(body.get("identity") or ""),
+            strict_host_key="accept-new" if body.get("accept_new") else "",
+        )
+        runner = host.runner()
+        steps: list[dict[str, Any]] = []
+
+        def step(name: str, argv: list[str], parse=lambda r: r.text) -> bool:
+            result = runner.run(argv, timeout=25)
+            steps.append({
+                "name": name, "ok": result.ok,
+                "detail": parse(result) if result.ok
+                else (result.err.strip() or result.out.strip() or f"exit {result.code}"),
+            })
+            return result.ok
+
+        try:
+            if not step("连接", ["uname", "-sm"]):
+                return {"ok": False, "steps": steps,
+                        "hint": "连不上。检查地址、端口和私钥；BatchMode 是开着的，"
+                                "所以不会弹密码框而是直接失败。"}
+            if not step("docker", ["docker", "version", "--format", "{{.Server.Version}}"]):
+                return {"ok": False, "steps": steps,
+                        "hint": "目标机上没有可用的 docker。装好并把当前用户加进 docker 组"
+                                "（usermod -aG docker $USER，然后重新登录）。"}
+            step("compose", ["docker", "compose", "version", "--short"])
+            step("内存", ["sh", "-c", "free -g | awk 'NR==2{print $2\" GB\"}'"])
+            step("当前用户", ["id", "-un"])
+        except (DeployError, SleightError) as exc:
+            return {"ok": False, "steps": steps, "hint": f"{type(exc).__name__}: {exc}"}
+        finally:
+            runner.close()
+        return {"ok": all(s["ok"] for s in steps), "steps": steps, "hint": ""}
+
     @app.get("/api/hosts")
     def list_hosts() -> list[dict[str, Any]]:
-        inv = Inventory.load()
+        db = store()
+        deployments = db.deployments()
         out = [
-            {
-                "name": name, "ssh": h.ssh, "port": h.port, "identity": h.identity,
-                "sudo": h.sudo, "local": h.local, "deploy": h.deploy,
-                "spec": asdict(h.spec()),
-            }
-            for name, h in sorted(inv.hosts.items())
+            {**h.to_dict(),
+             "deployments": [d.to_dict() for d in deployments if d.host == h.name]}
+            for h in db.hosts()
         ]
-        if "local" not in inv.hosts:
-            # 本机永远可选：装了 docker 就能一键部署，不必先配 hosts.toml
+        if not any(h["name"] == "local" for h in out):
+            # 本机永远可选：装了 docker 就能一键部署，不必先配主机
             out.insert(0, {
-                "name": "local", "ssh": "", "port": None, "identity": "", "sudo": False,
-                "local": True, "deploy": {}, "spec": asdict(DeploySpec()), "implicit": True,
+                **Host(name="local").to_dict(), "implicit": True,
+                "deployments": [
+                    Deployment(host="local", name="default", spec=DeploySpec()).to_dict()
+                ],
             })
         return out
 
     @app.post("/api/hosts")
     def add_host(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """记一台主机，顺带建一个叫 default 的部署 —— 没有部署记录的主机没法用。"""
         name = str(body.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
-        deploy = {k: v for k, v in (body.get("deploy") or {}).items() if v not in (None, "")}
-        wrap(lambda: DeploySpec.from_dict(deploy).validate())
-        inv = Inventory.load()
-        inv.add(Host(
+        spec_fields = {k: v for k, v in (body.get("deploy") or {}).items() if v not in (None, "")}
+        db = store()
+        wrap(lambda: db.put_host(Host(
             name=name,
             ssh=str(body.get("ssh") or ""),
             port=int(body["port"]) if body.get("port") else None,
             identity=str(body.get("identity") or ""),
             sudo=bool(body.get("sudo")),
             strict_host_key="accept-new" if body.get("accept_new") else "",
-            deploy=deploy,
-        ))
-        inv.save()
-        return {"ok": True, "path": str(inv.path)}
+            notes=str(body.get("notes") or ""),
+        )))
+        deployment = str(body.get("deployment") or "default")
+        wrap(lambda: db.put_deployment(name, deployment, DeploySpec.from_dict(spec_fields)))
+        return {"ok": True, "path": str(db.path), "ref": f"{name}/{deployment}"}
 
     @app.delete("/api/hosts/{name}")
     def remove_host(name: str) -> dict[str, Any]:
-        inv = Inventory.load()
-        wrap(lambda: inv.remove(name))
-        inv.save()
+        db = store()
+        wrap(lambda: db.delete_host(name))
         return {"ok": True}
+
+    # ---------------------------------------------------------------- #
+    # 部署记录（一台机上的 N 个 Manager）
+    # ---------------------------------------------------------------- #
+
+    @app.get("/api/deployments")
+    def list_deployments(host: str | None = None) -> list[dict[str, Any]]:
+        return [d.to_dict() for d in store().deployments(host=host)]
+
+    @app.post("/api/deployments")
+    def add_deployment(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        host = str(body.get("host") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not host or not name:
+            raise HTTPException(status_code=400, detail="host and name are required")
+        spec_fields = {k: v for k, v in (body.get("spec") or {}).items() if v not in (None, "")}
+        db = store()
+        wrap(lambda: db.put_deployment(host, name, DeploySpec.from_dict(spec_fields)))
+        return {"ok": True, "ref": f"{host}/{name}"}
+
+    @app.delete("/api/deployments/{host}/{name}")
+    def remove_deployment(host: str, name: str) -> dict[str, Any]:
+        wrap(lambda: store().delete_deployment(host, name))
+        return {"ok": True}
+
+    @app.get("/api/events")
+    def list_events(host: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        return [e.to_dict() for e in store().events(host=host, limit=limit)]
 
     # ---------------------------------------------------------------- #
     # 部署
     # ---------------------------------------------------------------- #
 
     @app.post("/api/hosts/{name}/preflight")
-    def preflight(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-        dep = deployer(name, **_spec_overrides(body))
+    def preflight(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        dep, _ = deployer(_ref(name, deployment), **_spec_overrides(body))
         plan = wrap(dep.plan)
         return {
             "blocked": plan.blocked,
@@ -291,21 +399,26 @@ def create_app(*, token: str | None = None) -> Any:
         }
 
     @app.get("/api/hosts/{name}/status")
-    def status(name: str) -> dict[str, Any]:
-        return wrap(deployer(name).status)
+    def status(name: str, deployment: str | None = None) -> dict[str, Any]:
+        return wrap(deployer(_ref(name, deployment))[0].status)
 
     @app.get("/api/hosts/{name}/logs")
-    def logs(name: str, tail: int = 200) -> dict[str, Any]:
-        return {"text": wrap(lambda: deployer(name).logs(tail=tail))}
+    def logs(name: str, tail: int = 200, deployment: str | None = None) -> dict[str, Any]:
+        return {"text": wrap(lambda: deployer(_ref(name, deployment))[0].logs(tail=tail))}
 
     @app.post("/api/hosts/{name}/deploy")
-    def deploy(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    def deploy(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
         overrides = _spec_overrides(body)
         force = bool(body.get("force"))
+        ref = _ref(name, deployment)
 
         def work(say: Callable[[str], None]) -> dict[str, Any]:
-            dep = deployer(name, on_progress=say, **overrides)
+            dep, entry = deployer(ref, on_progress=say, **overrides)
             result = dep.apply(force=force)
+            record(entry, "deploy", ok=True, image=dep.spec.image, status=result.status,
+                   detail="有变更" if result.changed else "无变更")
             return {
                 "changed": result.changed,
                 "summary": result.summary,
@@ -318,24 +431,95 @@ def create_app(*, token: str | None = None) -> Any:
         return {"job": jobs.start("deploy", name, work).id}
 
     @app.post("/api/hosts/{name}/upgrade")
-    def upgrade(name: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    def upgrade(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        ref = _ref(name, deployment)
         image = str(body.get("image") or "").strip()
         if not image:
             raise HTTPException(status_code=400, detail="image is required")
         backup = bool(body.get("backup", True))
 
         def work(say: Callable[[str], None]) -> dict[str, Any]:
-            dep = deployer(name, on_progress=say)
+            dep, entry = deployer(ref, on_progress=say)
             result = dep.upgrade(image, backup=backup)
+            record(entry, "upgrade", ok=True, image=image, status=result.status,
+                   detail=f"→ {image}")
             return {"summary": result.summary, "status": result.status}
 
         return {"job": jobs.start("upgrade", name, work).id}
 
-    @app.post("/api/hosts/{name}/backup")
-    def backup(name: str) -> dict[str, Any]:
+    @app.get("/api/hosts/{name}/token")
+    def token_of(name: str, deployment: str | None = None) -> dict[str, Any]:
+        """取回完整的 AUTH_TOKEN。
+
+        它就在目标机的 ``.env``（600）里，能操作这个界面的人本来就能 SSH 上去读到。
+        Manager 的 Web UI 要用它 —— 那边没有用户名密码，token 就是唯一凭据。
+        """
+        dep, _ = deployer(_ref(name, deployment))
+        value = wrap(dep.existing_token)
+        if not value:
+            raise HTTPException(
+                status_code=404, detail=f"{dep.spec.env_path} 里没有 AUTH_TOKEN，还没部署过？"
+            )
+        return {"token": value, "url": dep.spec.local_url, "env_path": dep.spec.env_path}
+
+    @app.post("/api/hosts/{name}/rollback")
+    def rollback(name: str, deployment: str | None = None) -> dict[str, Any]:
+        ref = _ref(name, deployment)
+
         def work(say: Callable[[str], None]) -> dict[str, Any]:
-            dep = deployer(name, on_progress=say)
-            return {"archive": dep.backup()}
+            dep, entry = deployer(ref, on_progress=say)
+            result = dep.rollback()
+            record(entry, "rollback", ok=True, image=dep.spec.image, status=result.status,
+                   detail=f"→ {dep.spec.image}")
+            return {"summary": result.summary, "status": result.status}
+
+        return {"job": jobs.start("rollback", ref, work).id}
+
+    @app.post("/api/hosts/{name}/destroy")
+    def destroy(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """停并删容器。``purge_data`` 要额外把部署名原样打一遍才认。
+
+        删 ``data/`` 是不可逆的：profile 数据库、指纹种子、Cookie 和全部登录态都在
+        里面。命令行那边要 ``--purge-data --yes``，界面这边就得打字确认 —— 一个能被
+        误点的按钮不该有这种后果。
+        """
+        ref = _ref(name, deployment)
+        purge = bool(body.get("purge_data"))
+        if purge:
+            # 比对**解析之后**的 host/deployment，不是调用方随手写的那串 ——
+            # 确认的是"要销毁哪个东西"，不该取决于你怎么寻址它
+            _, entry = _entry(ref)
+            if str(body.get("confirm") or "") != entry.ref:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"要删 data/ 就把 {entry.ref!r} 原样打一遍 —— "
+                        "登录态和 profile 删了回不来"
+                    ),
+                )
+
+        def work(say: Callable[[str], None]) -> dict[str, Any]:
+            dep, entry = deployer(ref, on_progress=say)
+            dep.destroy(purge_data=purge)
+            record(entry, "destroy", ok=True,
+                   detail="连 data/ 一起删" if purge else "保留 data/")
+            return {"purged": purge}
+
+        return {"job": jobs.start("destroy", ref, work).id}
+
+    @app.post("/api/hosts/{name}/backup")
+    def backup(name: str, deployment: str | None = None) -> dict[str, Any]:
+        ref = _ref(name, deployment)
+
+        def work(say: Callable[[str], None]) -> dict[str, Any]:
+            dep, entry = deployer(ref, on_progress=say)
+            archive = dep.backup()
+            record(entry, "backup", ok=True, detail=archive)
+            return {"archive": archive}
 
         return {"job": jobs.start("backup", name, work).id}
 
@@ -344,15 +528,80 @@ def create_app(*, token: str | None = None) -> Any:
     # ---------------------------------------------------------------- #
 
     @app.get("/api/hosts/{name}/profiles")
-    def profiles(name: str) -> list[dict[str, Any]]:
-        raw = wrap(ProfileOps(deployer(name)).list)
+    def profiles(name: str, deployment: str | None = None) -> list[dict[str, Any]]:
+        raw = wrap(ProfileOps(deployer(_ref(name, deployment))[0]).list)
         for p in raw:
             p["extension_paths"] = extension_paths([str(a) for a in (p.get("launch_args") or [])])
         return raw
 
+    @app.post("/api/hosts/{name}/profiles")
+    def create_profile(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        """按身份模板建一个实例。**幂等**：同名的会被更新而不是再建一个。
+
+        ``auto_launch`` 一律 False —— 建的时候不该顺手拉起一个浏览器占着内存，
+        要用时 ``lease()`` 会自己拉。
+        """
+        profile_name = str(body.get("name") or "").strip()
+        if not profile_name:
+            raise HTTPException(status_code=400, detail="实例得有个名字")
+        overrides: dict[str, Any] = {
+            "proxy": body.get("proxy"),
+            "geoip": bool(body.get("geoip")),
+            "headless": bool(body.get("headless")),
+            "notes": body.get("notes"),
+            "tags": tuple(t.strip() for t in str(body.get("tags") or "").split(",") if t.strip()),
+        }
+        for key in ("screen_width", "screen_height", "fingerprint_seed"):
+            if body.get(key):
+                overrides[key] = int(body[key])
+        spec = wrap(lambda: profile_spec_from(
+            str(body.get("preset") or "windows_us"), profile_name, **overrides
+        ))
+        dep, _ = deployer(_ref(name, deployment))
+
+        def make() -> dict[str, Any]:
+            with dep.connect() as mgr:
+                info = mgr.ensure_profile(spec)
+                return {"id": info.id, "name": info.name, "tags": sorted(info.tags)}
+
+        return wrap(make)
+
+    @app.delete("/api/hosts/{name}/profiles/{pid}")
+    def delete_profile(
+        name: str, pid: str, confirm: str = "", deployment: str | None = None
+    ) -> dict[str, Any]:
+        """删一个实例。**要把它的名字原样打一遍。**
+
+        删 profile 连带删掉 ``user_data_dir`` —— Cookie 和登录态一起没，不可逆。
+        停止实例不会丢这些，删才会。
+        """
+        dep, _ = deployer(_ref(name, deployment))
+
+        def drop() -> dict[str, Any]:
+            with dep.connect() as mgr:
+                raw = next((p for p in mgr.list_profiles() if str(p.get("id")) == pid), None)
+                if raw is None:
+                    raise HTTPException(status_code=404, detail=f"没有 id 为 {pid} 的实例")
+                if confirm != (raw.get("name") or ""):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"要删就把实例名 {raw.get('name')!r} 原样打一遍 —— "
+                            "删 profile 连登录态一起删，回不来"
+                        ),
+                    )
+                mgr.delete_profile(pid, force=True)
+                return {"ok": True, "name": raw.get("name")}
+
+        return wrap(drop)
+
     @app.post("/api/hosts/{name}/profiles/{pid}/{action}")
-    def profile_action(name: str, pid: str, action: str) -> dict[str, Any]:
-        ops = ProfileOps(deployer(name))
+    def profile_action(
+        name: str, pid: str, action: str, deployment: str | None = None
+    ) -> dict[str, Any]:
+        ops = ProfileOps(deployer(_ref(name, deployment))[0])
         if action == "launch":
             return {"id": wrap(lambda: ops.launch(pid))}
         if action == "stop":
@@ -366,50 +615,64 @@ def create_app(*, token: str | None = None) -> Any:
     # ---------------------------------------------------------------- #
 
     @app.get("/api/hosts/{name}/extensions")
-    def extensions(name: str) -> list[dict[str, Any]]:
-        ops = ExtensionOps(deployer(name))
+    def extensions(name: str, deployment: str | None = None) -> list[dict[str, Any]]:
+        ops = ExtensionOps(deployer(_ref(name, deployment))[0])
         return [asdict(e) for e in wrap(ops.list_installed)]
 
     @app.get("/api/hosts/{name}/extensions/drift")
-    def drift(name: str) -> dict[str, Any]:
-        return wrap(ExtensionOps(deployer(name)).drift)
+    def drift(name: str, deployment: str | None = None) -> dict[str, Any]:
+        return wrap(ExtensionOps(deployer(_ref(name, deployment))[0]).drift)
 
     @app.post("/api/hosts/{name}/extensions/push")
-    def push(name: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    def push(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        ref = _ref(name, deployment)
         path = str(body.get("path") or "").strip()
         if not path:
             raise HTTPException(status_code=400, detail="path is required")
         as_name = str(body.get("as") or "") or None
 
         def work(say: Callable[[str], None]) -> dict[str, Any]:
-            dep = deployer(name, on_progress=say)
+            dep, entry = deployer(ref, on_progress=say)
             ops = ExtensionOps(dep, on_progress=say)
-            return asdict(ops.push(path, name=as_name))
+            pushed = asdict(ops.push(path, name=as_name))
+            record(entry, "ext-push", ok=True, detail=str(pushed.get("dirname", "")))
+            return pushed
 
         return {"job": jobs.start("ext-push", name, work).id}
 
     @app.post("/api/hosts/{name}/extensions/apply")
-    def ext_apply(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    def ext_apply(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        ref = _ref(name, deployment)
         only = body.get("only") or None
         restart = bool(body.get("restart", True))
 
         def work(say: Callable[[str], None]) -> list[dict[str, Any]]:
-            ops = ExtensionOps(deployer(name), on_progress=say)
+            dep, entry = deployer(ref, on_progress=say)
+            changes = ExtensionOps(dep, on_progress=say).apply(names=only, restart=restart)
+            record(entry, "ext-apply", ok=True,
+                   detail=f"{sum(1 for c in changes if c.updated)}/{len(changes)} 个 profile 有改动")
             return [
                 {"id": c.id, "name": c.name, "updated": c.updated, "stopped": c.stopped,
                  "before": c.before, "after": c.after, "summary": c.summary}
-                for c in ops.apply(names=only, restart=restart)
+                for c in changes
             ]
 
         return {"job": jobs.start("ext-apply", name, work).id}
 
     @app.post("/api/hosts/{name}/extensions/verify")
-    def ext_verify(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    def ext_verify(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        ref = _ref(name, deployment)
         launch = bool(body.get("launch", True))
         settle = float(body.get("settle", 6.0))
 
         def work(say: Callable[[str], None]) -> list[dict[str, Any]]:
-            ops = ExtensionOps(deployer(name), on_progress=say)
+            ops = ExtensionOps(deployer(ref)[0], on_progress=say)
             return [
                 {"id": r.id, "name": r.name, "running": r.running, "ok": r.ok,
                  "expected": r.expected, "loaded": sorted(r.loaded), "summary": r.summary}

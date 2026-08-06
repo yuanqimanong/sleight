@@ -329,7 +329,7 @@ class SSHRunner(_BaseRunner):
             "-o", "ControlPersist=60s",
         ]
 
-    def _ssh_argv(self, *, tty: bool = False) -> list[str]:
+    def _ssh_argv(self, *, tty: bool = False, multiplex: bool = True) -> list[str]:
         argv = ["ssh"]
         if self.identity:
             argv += ["-i", self.identity]
@@ -344,7 +344,8 @@ class SSHRunner(_BaseRunner):
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
         ]
-        argv += self._control_args()
+        # 端口转发必须独占一条连接，见 tunnel() 的说明
+        argv += self._control_args() if multiplex else ["-o", "ControlPath=none"]
         for opt in self.options:
             argv += ["-o", opt]
         if not tty:
@@ -410,12 +411,18 @@ class SSHRunner(_BaseRunner):
         Manager 通常只绑在目标机的 ``127.0.0.1`` 上，控制机想直接调它的 HTTP API
         就得先有这条隧道。用完即拆。
 
+        **刻意不复用连接**（``ControlPath=none``）。走复用的话，master 已经存在时这条
+        ``ssh -N -L`` 只是个 slave：它把转发请求交给 master 之后**立刻 exit 0**，于是
+        "进程还活着"不再等价于"隧道还在"；而且转发归 master 所有，``terminate()`` 也
+        拆不掉，会一直漏到 master 过期。独占一条连接换来的是"进程活着 = 隧道在、
+        进程结束 = 隧道没了"这个能靠得住的等价关系，代价只是一次握手。
+
         :param remote_port: 目标机上的端口
         :returns: 控制机上的本地端口（上下文内有效）
         """
         local_port = _free_port()
         argv = [
-            *self._ssh_argv(),
+            *self._ssh_argv(multiplex=False),
             "-N",
             "-o", "ExitOnForwardFailure=yes",
             "-L", f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
@@ -512,12 +519,14 @@ def _wait_port(port: int, proc: subprocess.Popen[bytes], *, timeout: float) -> N
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            err = _decode(proc.stderr.read() if proc.stderr else b"").strip()
-            raise DeployError(f"ssh tunnel failed to start: {err or f'exit {proc.returncode}'}")
+        # 先探端口再看进程：顺序反了的话，一个"已经通了但进程刚好退出"的隧道会被
+        # 误判成失败
         with socket.socket() as sock:
             sock.settimeout(0.5)
             if sock.connect_ex(("127.0.0.1", port)) == 0:
                 return
+        if proc.poll() is not None:
+            err = _decode(proc.stderr.read() if proc.stderr else b"").strip()
+            raise DeployError(f"ssh tunnel failed to start: {err or f'exit {proc.returncode}'}")
         time.sleep(0.1)
     raise DeployError(f"ssh tunnel did not come up on 127.0.0.1:{port} within {timeout:.0f}s")

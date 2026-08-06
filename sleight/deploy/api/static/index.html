@@ -5,440 +5,1099 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sleight deploy</title>
 <style>
-  :root {
-    --bg: #10151c; --panel: #171d26; --line: #26303d; --fg: #dfe6ef; --dim: #8b97a8;
-    --ok: #4ec98a; --warn: #e6b455; --bad: #e2685f; --acc: #5aa9f0; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+/* ========================================================================== *
+ * 设计变量。浅色是默认，深色靠 :root[data-theme="dark"] 覆盖；
+ * data-theme="auto" 时交给 prefers-color-scheme。
+ * ========================================================================== */
+:root {
+  --bg:#f6f7f9;  --panel:#fff;     --panel-2:#fafbfc; --line:#e3e7ed;
+  --fg:#1b2330;  --dim:#657085;    --faint:#8d97a8;
+  --acc:#2563eb; --acc-fg:#fff;    --acc-soft:#e8f0fe;
+  --ok:#0f7a4d;  --ok-soft:#e6f5ee;
+  --warn:#8a5a00;--warn-soft:#fdf3e0;
+  --bad:#c02a20; --bad-soft:#fdeceb;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r:10px; --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+}
+:root[data-theme="dark"] {
+  --bg:#0e131a;  --panel:#151c25;  --panel-2:#1a222d; --line:#26303d;
+  --fg:#e2e8f0;  --dim:#94a3b8;    --faint:#6b7a8d;
+  --acc:#60a5fa; --acc-fg:#0b1220; --acc-soft:#17263c;
+  --ok:#4ade80;  --ok-soft:#12251c;
+  --warn:#fbbf24;--warn-soft:#2a2113;
+  --bad:#f87171; --bad-soft:#2c1717;
+  --shadow:0 1px 2px rgba(0,0,0,.3);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --bg:#0e131a;  --panel:#151c25;  --panel-2:#1a222d; --line:#26303d;
+    --fg:#e2e8f0;  --dim:#94a3b8;    --faint:#6b7a8d;
+    --acc:#60a5fa; --acc-fg:#0b1220; --acc-soft:#17263c;
+    --ok:#4ade80;  --ok-soft:#12251c;
+    --warn:#fbbf24;--warn-soft:#2a2113;
+    --bad:#f87171; --bad-soft:#2c1717;
+    --shadow:0 1px 2px rgba(0,0,0,.3);
   }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#f5f7fa; --panel:#fff; --line:#dde3ec; --fg:#1c2430; --dim:#5d6a7c;
-            --ok:#12855a; --warn:#8a6212; --bad:#c0372c; --acc:#1b6fc4; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.55 system-ui,-apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif; }
-  header { display:flex; align-items:baseline; gap:12px; padding:14px 20px;
-           border-bottom:1px solid var(--line); }
-  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.02em; }
-  header .v { color:var(--dim); font-size:12px; font-family:var(--mono); }
-  header .sp { flex:1; }
-  main { display:grid; grid-template-columns:262px 1fr; gap:0; align-items:start; }
-  @media (max-width:900px) { main { grid-template-columns:1fr; } }
-  aside { border-right:1px solid var(--line); min-height:calc(100vh - 50px); padding:14px; }
-  section.body { padding:18px 20px 40px; }
-  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim);
-       margin:0 0 10px; font-weight:600; }
-  .host { display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px;
-          background:transparent; color:var(--fg); border:1px solid transparent;
-          border-radius:7px; cursor:pointer; font:inherit; }
-  .host:hover { background:var(--panel); }
-  .host.on { background:var(--panel); border-color:var(--acc); }
-  .host b { display:block; font-weight:600; }
-  .host span { color:var(--dim); font-size:12px; font-family:var(--mono); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-          padding:14px 16px; margin-bottom:14px; }
-  .tabs { display:flex; gap:4px; margin-bottom:14px; flex-wrap:wrap; }
-  .tabs button { background:transparent; border:1px solid var(--line); color:var(--dim);
-                 padding:6px 12px; border-radius:7px; cursor:pointer; font:inherit; }
-  .tabs button.on { color:var(--fg); border-color:var(--acc); background:var(--panel); }
-  button.go { background:var(--acc); border:0; color:#fff; padding:7px 14px; border-radius:7px;
-              cursor:pointer; font:inherit; font-weight:600; }
-  button.go.danger { background:var(--bad); }
-  button.go:disabled { opacity:.5; cursor:default; }
-  button.mini { background:transparent; border:1px solid var(--line); color:var(--fg);
-                padding:3px 9px; border-radius:6px; cursor:pointer; font:inherit; font-size:12px; }
-  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 3px; }
-  input, select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
-                  border-radius:6px; padding:6px 9px; font:inherit; font-family:var(--mono);
-                  font-size:13px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:0 14px; }
-  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th { text-align:left; color:var(--dim); font-weight:600; font-size:12px;
-       border-bottom:1px solid var(--line); padding:6px 8px; }
-  td { padding:6px 8px; border-bottom:1px solid var(--line); font-family:var(--mono); }
-  .scroll { overflow-x:auto; }
-  pre { font-family:var(--mono); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
-        margin:0; }
-  #log { background:#0b0f14; color:#cfe0f0; border:1px solid var(--line); border-radius:10px;
-         padding:12px 14px; max-height:340px; overflow:auto; }
-  @media (prefers-color-scheme: light) { #log { background:#0d1218; } }
-  .chk { padding:3px 0; }
-  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
-  .dim { color:var(--dim); }
-  .pill { font-family:var(--mono); font-size:11.5px; padding:1px 7px; border-radius:20px;
-          border:1px solid var(--line); }
-  .note { color:var(--dim); font-size:12.5px; margin-top:8px; }
-  code { font-family:var(--mono); background:var(--bg); padding:1px 5px; border-radius:4px; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 system-ui,-apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif}
+h1,h2,h3{margin:0;font-weight:600}
+pre{margin:0}
+
+header{display:flex;align-items:center;gap:14px;padding:12px 20px;background:var(--panel);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+header h1{font-size:15px}
+header .ver{color:var(--faint);font:12px var(--mono)}
+.spacer{flex:1}
+main{display:grid;grid-template-columns:290px minmax(0,1fr);align-items:start}
+@media(max-width:920px){main{grid-template-columns:1fr}}
+aside{border-right:1px solid var(--line);min-height:calc(100vh - 53px);padding:16px 14px;
+  background:var(--panel)}
+section.body{padding:20px 24px 60px;min-width:0}
+
+.eyebrow{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+  font-weight:600;margin-bottom:10px}
+.muted{color:var(--dim)}
+.tiny{font-size:12.5px;line-height:1.55}
+.mono{font-family:var(--mono);font-size:12.5px}
+.stack{display:flex;flex-direction:column;gap:14px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 16px}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:18px;box-shadow:var(--shadow)}
+.card h2{font-size:14.5px;margin-bottom:4px}
+.card > .sub{color:var(--dim);font-size:12.5px;margin-bottom:14px;line-height:1.6}
+
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);color:var(--fg);padding:7px 13px;transition:.12s}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-fg);font-weight:600}
+button.danger{border-color:var(--bad);color:var(--bad)}
+button.danger.primary{background:var(--bad);border-color:var(--bad);color:#fff}
+button.ghost{border-color:transparent;background:transparent;color:var(--dim);padding:5px 9px}
+button.ghost:hover{background:var(--bg);color:var(--fg)}
+button.sm{padding:4px 10px;font-size:12.5px}
+
+.field{margin-bottom:15px}
+.field > label{display:block;font-weight:600;font-size:13px;margin-bottom:3px}
+.field .why{color:var(--dim);font-size:12.5px;line-height:1.5;margin-bottom:6px}
+.field .rec{color:var(--ok);font-size:12.5px;margin-top:5px}
+.field .rec::before{content:"推荐 ";color:var(--faint)}
+input[type=text],input[type=number],select{width:100%;padding:8px 10px;border:1px solid var(--line);
+  border-radius:8px;background:var(--bg);color:var(--fg);font:13px var(--mono)}
+input:focus,select:focus{outline:2px solid var(--acc-soft);border-color:var(--acc)}
+.check{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+.check input{margin-top:4px;width:auto;flex:none}
+
+.hostgroup{margin-bottom:18px}
+.hostgroup > .name{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13px;
+  padding:0 6px 6px;flex-wrap:wrap}
+.target{display:block;width:100%;text-align:left;padding:9px 11px;margin-bottom:5px;
+  border:1px solid transparent;border-radius:9px;background:transparent}
+.target:hover{background:var(--bg)}
+.target[aria-current="true"]{background:var(--acc-soft);border-color:var(--acc)}
+.target b{display:block;font-size:13px}
+.target .meta{display:block;color:var(--dim);font:11.5px var(--mono);margin-top:2px}
+
+.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;
+  font-size:11.5px;font-weight:600;border:1px solid transparent}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.bad{background:var(--bad-soft);color:var(--bad)}
+.badge.idle{background:var(--bg);color:var(--dim);border-color:var(--line)}
+
+nav.tabs{display:flex;gap:3px;margin-bottom:18px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+nav.tabs button{border:0;border-radius:0;background:transparent;color:var(--dim);padding:9px 14px;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+nav.tabs button[aria-current="true"]{color:var(--fg);border-bottom-color:var(--acc);font-weight:600}
+nav.tabs button:hover{color:var(--fg)}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
+  padding:7px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.scroll{overflow-x:auto}
+
+.steps{display:flex;margin-bottom:22px;flex-wrap:wrap}
+.steps .s{display:flex;align-items:center;gap:9px;padding:0 18px 0 0;color:var(--faint)}
+.steps .s .n{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;
+  border:1px solid var(--line);font-size:12px;font-weight:600;flex:none}
+.steps .s[data-on="true"]{color:var(--fg)}
+.steps .s[data-on="true"] .n{background:var(--acc);border-color:var(--acc);color:var(--acc-fg)}
+.steps .s[data-done="true"] .n{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+
+.pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.pick button{text-align:left;padding:14px;border-radius:var(--r);height:100%}
+.pick button[aria-pressed="true"]{border-color:var(--acc);background:var(--acc-soft)}
+.pick b{display:block;font-size:13.5px;margin-bottom:4px}
+.pick .s1{display:block;color:var(--dim);font-size:12.5px}
+.pick .s2{display:block;color:var(--faint);font-size:12px;margin-top:7px;line-height:1.5}
+
+.chk{display:flex;gap:9px;padding:6px 0;align-items:flex-start;font-size:13px}
+.chk .m{flex:none;width:16px;font-weight:700}
+.chk .hint{color:var(--dim);font-size:12.5px;margin-top:3px;white-space:pre-wrap}
+
+#log{background:#0b1017;color:#cbd5e1;border-radius:var(--r);padding:13px 15px;max-height:320px;
+  overflow:auto;font:12.5px/1.65 var(--mono);border:1px solid var(--line)}
+#log p{margin:0;white-space:pre-wrap;word-break:break-word}
+#log p.ok{color:#4ade80} #log p.bad{color:#f87171} #log p.dim{color:#64748b}
+
+.empty{text-align:center;padding:44px 20px;color:var(--dim)}
+.empty h3{font-size:15px;margin-bottom:8px;color:var(--fg)}
+.callout{border-left:3px solid var(--warn);background:var(--warn-soft);padding:11px 14px;
+  border-radius:6px;font-size:12.5px;line-height:1.65;white-space:pre-wrap}
+.callout.bad{border-color:var(--bad);background:var(--bad-soft)}
+.callout.ok{border-color:var(--ok);background:var(--ok-soft)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 16px;font-size:13px;margin:0}
+.kv dt{color:var(--dim)}
+.kv dd{margin:0;font-family:var(--mono);font-size:12.5px;word-break:break-all;white-space:pre-wrap}
 </style>
 </head>
 <body>
-<header>
-  <h1>sleight deploy</h1>
-  <span class="v" id="ver"></span>
-  <span class="sp"></span>
-  <span class="v" id="tokwrap" hidden>口令 <input id="tok" style="width:180px;display:inline-block"></span>
-</header>
-
-<main>
-  <aside>
-    <h2>目标机</h2>
-    <div id="hosts"></div>
-    <details style="margin-top:14px">
-      <summary class="dim" style="cursor:pointer;font-size:12.5px">加一台</summary>
-      <label>名字</label><input id="h_name" placeholder="hk-01">
-      <label>SSH（留空 = 本机）</label><input id="h_ssh" placeholder="deploy@1.2.3.4">
-      <label>SSH 端口</label><input id="h_port" placeholder="22">
-      <label>私钥</label><input id="h_key" placeholder="~/.ssh/id_ed25519">
-      <label>部署目录</label><input id="h_dir">
-      <label><input type="checkbox" id="h_sudo" style="width:auto"> 用 sudo -n 建目录</label>
-      <label><input type="checkbox" id="h_new" style="width:auto"> 首次连接信任指纹</label>
-      <div class="row"><button class="go" id="h_add">保存</button></div>
-    </details>
-  </aside>
-
-  <section class="body">
-    <div class="tabs" id="tabs"></div>
-    <div id="view"></div>
-    <h2 style="margin-top:18px">日志</h2>
-    <div id="log"><pre class="dim">选一台目标机开始。所有动作的进度会实时打在这里。</pre></div>
-  </section>
-</main>
+<div id="app"></div>
 
 <script>
-const $ = (id) => document.getElementById(id);
-let HOSTS = [], CUR = null, TAB = "overview", DEFAULTS = null, ES = null;
+"use strict";
 
-/* ---------- 基础 ---------- */
-function token() { return $("tok").value.trim(); }
-async function api(path, opts = {}) {
-  const headers = { "Content-Type": "application/json" };
-  if (token()) headers["X-Sleight-Token"] = token();
-  const r = await fetch(path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  const text = await r.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
-  if (!r.ok) throw new Error((data && data.detail) || `HTTP ${r.status}`);
-  return data;
-}
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-function log(line, cls = "") {
-  const pre = document.createElement("pre");
-  if (cls) pre.className = cls;
-  pre.textContent = line;
-  $("log").appendChild(pre);
-  $("log").scrollTop = $("log").scrollHeight;
-}
-function clearLog() { $("log").innerHTML = ""; }
-function fail(e) { log("✗ " + e.message, "bad"); }
+/* ========================================================================== *
+ * 1. 小工具
+ * ========================================================================== */
 
-/* ---------- 主机 ---------- */
-async function loadHosts() {
-  HOSTS = await api("/api/hosts");
-  $("hosts").innerHTML = HOSTS.map((h) => `
-    <button class="host ${CUR === h.name ? "on" : ""}" data-h="${esc(h.name)}">
-      <b>${esc(h.name)}${h.implicit ? ' <span class="pill">本机</span>' : ""}</b>
-      <span>${esc(h.ssh || "本机")} · ${esc(h.spec.dir)}:${h.spec.port}</span>
-    </button>`).join("");
-  $("hosts").querySelectorAll("[data-h]").forEach((b) =>
-    b.onclick = () => { CUR = b.dataset.h; loadHosts(); render(); });
-  if (!CUR && HOSTS.length) { CUR = HOSTS[0].name; loadHosts(); render(); }
+/**
+ * 建 DOM。用它而不是拼 innerHTML：文本节点天然转义，事件直接挂在元素上，
+ * 不需要 id 查找，也就没有"重渲染之后 ref 失效"这类问题。
+ */
+function h(tag, props, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key.startsWith("on") && typeof value === "function") {
+      node.addEventListener(key.slice(2), value);
+    } else if (key === "class") {
+      node.className = value;
+    } else if (key in node && key !== "list" && key !== "form") {
+      node[key] = value;
+    } else {
+      node.setAttribute(key, value);
+    }
+  }
+  for (const kid of kids.flat(9)) {
+    if (kid === null || kid === undefined || kid === false || kid === "") continue;
+    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
 }
-$("h_add").onclick = async () => {
-  try {
-    await api("/api/hosts", { method: "POST", body: {
-      name: $("h_name").value.trim(), ssh: $("h_ssh").value.trim(),
-      port: $("h_port").value ? Number($("h_port").value) : null,
-      identity: $("h_key").value.trim(), sudo: $("h_sudo").checked,
-      accept_new: $("h_new").checked,
-      deploy: $("h_dir").value.trim() ? { dir: $("h_dir").value.trim() } : {},
-    }});
-    log("已保存到 hosts.toml", "ok");
-    CUR = $("h_name").value.trim();
-    await loadHosts(); render();
-  } catch (e) { fail(e); }
+const $ = (sel) => document.querySelector(sel);
+const clear = (node) => { while (node.firstChild) node.firstChild.remove(); return node; };
+/**
+ * 条件渲染。
+ *
+ * **子节点传函数**（`when(x, () => h(...x.foo...))`）才是惰性的 —— JS 会先算完实参
+ * 再调用，所以直接写 `when(x, h(...x.foo...))` 在 x 为 null 时会当场抛异常，
+ * 整棵树渲染失败变成白屏。条件本身就是"这东西存在吗"的时候，一律用函数形式。
+ */
+const when = (cond, ...kids) =>
+  (cond ? kids.map((k) => (typeof k === "function" ? k() : k)) : []);
+
+/* ========================================================================== *
+ * 2. 主题
+ * ========================================================================== */
+
+const THEMES = [["auto", "跟随系统", "◐"], ["light", "浅色", "☀"], ["dark", "深色", "☾"]];
+const applyTheme = (mode) => {
+  document.documentElement.dataset.theme = mode;
+  localStorage.setItem("sleight_theme", mode);
+};
+applyTheme(localStorage.getItem("sleight_theme") || "auto");
+
+const themeToggle = () => {
+  const current = document.documentElement.dataset.theme;
+  return h("div", { class: "row", style: "gap:2px" }, THEMES.map(([mode, label, glyph]) =>
+    h("button", {
+      class: "ghost sm", title: label, "aria-pressed": String(mode === current),
+      style: mode === current ? "color:var(--fg);background:var(--bg)" : "",
+      onclick: () => { applyTheme(mode); render(); },
+    }, glyph)));
 };
 
-/* ---------- job 流 ---------- */
-function follow(jobId, done) {
-  if (ES) ES.close();
-  const q = token() ? `?token=${encodeURIComponent(token())}` : "";
-  ES = new EventSource(`/api/jobs/${jobId}/events${q}`);
-  ES.addEventListener("line", (e) => log("  · " + JSON.parse(e.data).text));
-  ES.addEventListener("done", (e) => {
-    const job = JSON.parse(e.data);
-    ES.close(); ES = null;
-    if (job.status === "ok") { log("✓ 完成", "ok"); done && done(job.result); }
-    else log("✗ " + job.error, "bad");
-  });
-  ES.onerror = () => { if (ES) { ES.close(); ES = null; log("(事件流断开)", "dim"); } };
-}
-async function job(path, body, done) {
-  try {
-    const r = await api(path, { method: "POST", body: body || {} });
-    follow(r.job, done);
-  } catch (e) { fail(e); }
+/* ========================================================================== *
+ * 3. 状态与接口
+ * ========================================================================== */
+
+const S = {
+  defaults: null,   // /api/defaults：字段解释、模板、缺省 spec —— 都由后端定义
+  hosts: [],
+  ref: null,        // 当前目标：主机/部署名
+  tab: "overview",
+  wizard: null,
+  token: localStorage.getItem("sleight_ui_token") || "",
+  stream: null,
+};
+const cache = { status: null, profiles: null, ext: null, plan: null };
+const resetCache = () => { cache.status = cache.profiles = cache.ext = cache.plan = null; };
+
+async function api(path, { method = "GET", body } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (S.token) headers["X-Sleight-Token"] = S.token;
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+  if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+  return data;
 }
 
-/* ---------- 视图 ---------- */
-const TABS = [["overview", "概览"], ["deploy", "部署"], ["profiles", "Profile"], ["ext", "插件"]];
-function render() {
-  $("tabs").innerHTML = TABS.map(([k, t]) =>
-    `<button class="${TAB === k ? "on" : ""}" data-t="${k}">${t}</button>`).join("");
-  $("tabs").querySelectorAll("[data-t]").forEach((b) =>
-    b.onclick = () => { TAB = b.dataset.t; render(); });
-  if (!CUR) { $("view").innerHTML = `<div class="card dim">左边选一台目标机。</div>`; return; }
-  ({ overview: viewOverview, deploy: viewDeploy, profiles: viewProfiles, ext: viewExt })[TAB]();
+/** 当前目标的接口地址。部署名走查询参数 —— 路径参数不匹配斜杠。 */
+function url(suffix, extra) {
+  const [host, deployment] = (S.ref || "").split("/");
+  const query = new URLSearchParams(extra || {});
+  if (deployment) query.set("deployment", deployment);
+  const qs = query.toString();
+  return `/api/hosts/${encodeURIComponent(host)}${suffix}${qs ? "?" + qs : ""}`;
 }
-const host = () => HOSTS.find((h) => h.name === CUR) || { spec: {} };
 
-/* —— 概览 —— */
-async function viewOverview() {
-  $("view").innerHTML = `<div class="card dim">读取状态…</div>`;
+const allDeployments = () => S.hosts.flatMap((x) => x.deployments || []);
+const entry = () => allDeployments().find((d) => d.ref === S.ref) || null;
+const hostOf = () => S.hosts.find((x) => x.name === (S.ref || "").split("/")[0]) || null;
+
+/* ========================================================================== *
+ * 4. 日志
+ * ========================================================================== */
+
+const LOG = h("div", { id: "log" });
+const log = (text, kind) => {
+  LOG.append(h("p", { class: kind || "" }, text));
+  LOG.scrollTop = LOG.scrollHeight;
+};
+const wipe = () => clear(LOG);
+const oops = (err) => log("✗ " + err.message, "bad");
+
+/** 起一个后台 job，把进度流进日志。 */
+async function runJob(path, body, done) {
   try {
-    const s = await api(`/api/hosts/${CUR}/status`);
-    const c = s.container, a = s.api || {};
-    const cls = c.status === "running" ? "ok" : c.status === "absent" ? "dim" : "bad";
-    $("view").innerHTML = `
-      <div class="card">
-        <table>
-          <tr><th>目标</th><td>${esc(s.target)}</td></tr>
-          <tr><th>目录</th><td>${esc(s.dir)}</td></tr>
-          <tr><th>容器</th><td class="${cls}">${esc(c.status)} · 健康 ${esc(c.health)}</td></tr>
-          <tr><th>镜像</th><td>${esc(c.image || "—")}</td></tr>
-          <tr><th>端口</th><td>${esc((s.ports || []).join("  ") || "—")}</td></tr>
-          <tr><th>Manager</th><td>${a.binary_version
-            ? `内核 ${esc(a.binary_version)} · profile ${a.profiles_total} 个 · 运行中 ${a.running_count} 个`
-            : '<span class="dim">/api/status 无响应</span>'}</td></tr>
-          <tr><th>上次部署</th><td>${esc((s.state_file || {}).deployed_at || "—")}</td></tr>
-        </table>
-        <div class="row">
-          <button class="mini" id="b_logs">看日志</button>
-          <button class="mini" id="b_backup">停机备份</button>
-          <button class="mini" id="b_reload">刷新</button>
-        </div>
-        <div class="note">备份要停机 —— 在线复制 SQLite 会拿到和浏览器用户目录不一致的时间点。</div>
-      </div>`;
-    $("b_reload").onclick = viewOverview;
-    $("b_backup").onclick = () => { clearLog(); job(`/api/hosts/${CUR}/backup`, {},
-      (r) => log("归档 " + r.archive, "ok")); };
-    $("b_logs").onclick = async () => {
-      clearLog(); log("读取日志…", "dim");
-      try { const r = await api(`/api/hosts/${CUR}/logs?tail=200`); clearLog(); log(r.text); }
-      catch (e) { fail(e); }
+    const { job } = await api(path, { method: "POST", body: body || {} });
+    if (S.stream) S.stream.close();
+    const query = S.token ? `?token=${encodeURIComponent(S.token)}` : "";
+    const source = new EventSource(`/api/jobs/${job}/events${query}`);
+    S.stream = source;
+    source.addEventListener("line", (e) => log("  " + JSON.parse(e.data).text));
+    source.addEventListener("done", (e) => {
+      const finished = JSON.parse(e.data);
+      source.close();
+      S.stream = null;
+      if (finished.status === "ok") { log("✓ 完成", "ok"); if (done) done(finished.result); }
+      else log("✗ " + finished.error, "bad");
+    });
+    source.onerror = () => {
+      if (S.stream === source) { source.close(); S.stream = null; log("(事件流断开)", "dim"); }
     };
-  } catch (e) {
-    $("view").innerHTML = `<div class="card bad">${esc(e.message)}</div>`;
+  } catch (err) { oops(err); }
+}
+
+/* ========================================================================== *
+ * 5. 组件。字段的解释和推荐值全部来自后端，这里不写死任何一条
+ * ========================================================================== */
+
+const helpOf = (key) => (S.defaults && S.defaults.help[key]) || { label: key, why: "", recommend: "" };
+
+function field(key, opts) {
+  const meta = helpOf(key);
+  const control = opts.options
+    ? h("select", { onchange: (e) => opts.onInput(e.target.value) },
+        opts.options.map(([v, t]) => h("option", { value: v, selected: v === opts.value }, t)))
+    : h("input", {
+        type: opts.type || "text", value: opts.value ?? "", placeholder: opts.placeholder || "",
+        oninput: (e) => opts.onInput(e.target.value),
+      });
+  return h("div", { class: "field" },
+    h("label", null, opts.label || meta.label),
+    when(meta.why, h("div", { class: "why" }, meta.why)),
+    control,
+    when(meta.recommend, h("div", { class: "rec" }, meta.recommend)));
+}
+
+function checkbox(key, checked, onInput) {
+  const meta = helpOf(key);
+  return h("div", { class: "field" },
+    h("label", { class: "check" },
+      h("input", { type: "checkbox", checked, onchange: (e) => onInput(e.target.checked) }),
+      h("span", null,
+        h("b", { style: "font-size:13px" }, meta.label),
+        when(meta.why, h("div", { class: "why", style: "margin:2px 0 0" }, meta.why)),
+        when(meta.recommend, h("div", { class: "rec" }, meta.recommend)))));
+}
+
+const card = (title, sub, ...kids) => h("div", { class: "card" },
+  when(title, h("h2", null, title)), when(sub, h("div", { class: "sub" }, sub)), ...kids);
+
+const badge = (kind, text) => h("span", { class: "badge " + kind }, text);
+
+const copyable = (value) => h("span", { class: "row", style: "gap:8px" },
+  h("code", { class: "mono", style: "flex:1;word-break:break-all" }, value),
+  h("button", {
+    class: "sm ghost",
+    onclick: async (e) => {
+      const btn = e.target;
+      try { await navigator.clipboard.writeText(value); btn.textContent = "已复制"; }
+      catch { btn.textContent = "复制失败"; }
+      setTimeout(() => { btn.textContent = "复制"; }, 1500);
+    },
+  }, "复制"));
+
+const MARK = { ok: ["✓", "var(--ok)"], warn: ["!", "var(--warn)"], fail: ["✗", "var(--bad)"] };
+const checkList = (checks) => h("div", null, checks.map((c) => h("div", { class: "chk" },
+  h("span", { class: "m", style: "color:" + MARK[c.level][1] }, MARK[c.level][0]),
+  h("div", null, h("span", null, h("b", null, c.name), " ", c.detail),
+    when(c.hint, h("div", { class: "hint" }, "→ " + c.hint))))));
+
+/* ========================================================================== *
+ * 6. 引导：连接目标机 → 选规模 → 体检并创建
+ * ========================================================================== */
+
+function startWizard(seed) {
+  const stock = S.defaults.spec;
+  S.wizard = {
+    step: seed ? 2 : 1,      // 已知主机就跳过第一步
+    host: seed || { name: "", ssh: "", port: "", identity: "", sudo: false,
+                    accept_new: false, notes: "" },
+    lockHost: Boolean(seed),
+    probe: null,
+    template: "standard",
+    deployment: seed ? "second" : "default",
+    spec: { dir: stock.dir, image: stock.image, port: stock.port,
+            bind_ip: stock.bind_ip, shm_size: "5gb", expose: false },
+    saved: false,
+    plan: null,
+  };
+  S.tab = "wizard";
+  render();
+}
+
+const wizardView = () => {
+  const w = S.wizard;
+  const steps = (w.lockHost ? [] : [["连接目标机", 1]])
+    .concat([["选择规模", 2], ["体检并创建", 3]]);
+  return h("div", { class: "stack" },
+    h("div", { class: "steps" }, steps.map(([label, n]) =>
+      h("div", { class: "s", "data-on": String(w.step === n), "data-done": String(w.step > n) },
+        h("span", { class: "n" }, w.step > n ? "✓" : String(n)), h("span", null, label)))),
+    [wizardStep1, wizardStep2, wizardStep3][w.step - 1]());
+};
+
+function wizardStep1() {
+  const w = S.wizard;
+  const remote = Boolean(w.host.ssh.trim());
+  return card("① 这个 Manager 装在哪台机器上",
+    "目标机需要 docker 和 compose v2；远程还需要 sshd。**那台机上不用装 sleight。**",
+    h("div", { class: "grid2" },
+      h("div", null,
+        field("host_name", { value: w.host.name, placeholder: "hk-01",
+                             onInput: (v) => { w.host.name = v; } }),
+        field("ssh", { value: w.host.ssh, placeholder: "deploy@1.2.3.4，留空 = 本机",
+                       onInput: (v) => { w.host.ssh = v; scheduleRender(); } }),
+        when(remote,
+          field("ssh_port", { value: w.host.port, type: "number", placeholder: "22",
+                              onInput: (v) => { w.host.port = v; } }),
+          field("identity", { value: w.host.identity, placeholder: "~/.ssh/id_ed25519",
+                              onInput: (v) => { w.host.identity = v; } }))),
+      h("div", null,
+        field("notes", { value: w.host.notes, placeholder: "香港那台",
+                         onInput: (v) => { w.host.notes = v; } }),
+        when(remote, checkbox("accept_new", w.host.accept_new, (v) => { w.host.accept_new = v; })),
+        checkbox("sudo", w.host.sudo, (v) => { w.host.sudo = v; }))),
+    h("div", { class: "row" },
+      h("button", { class: "primary", onclick: doProbe }, "测试连接"),
+      h("button", {
+        disabled: !w.probe || !w.probe.ok || !w.host.name.trim(),
+        onclick: () => { w.step = 2; render(); },
+      }, "下一步 →"),
+      when(!w.host.name.trim(), h("span", { class: "tiny muted" }, "先给这台机起个名字"))),
+    when(w.probe, () => h("div", { style: "margin-top:14px" },
+      checkList((w.probe.steps || []).map((s) => ({
+        name: s.name, level: s.ok ? "ok" : "fail", detail: s.detail, hint: "" }))),
+      when(w.probe.hint, h("div", { class: "callout bad", style: "margin-top:10px" }, w.probe.hint)),
+      when(w.probe.ok && !w.probe.hint,
+        h("div", { class: "callout ok", style: "margin-top:10px" },
+          "连得上，docker 也在。可以下一步。")))));
+}
+
+async function doProbe() {
+  const w = S.wizard;
+  w.probe = { steps: [{ name: "测试中", ok: true, detail: "…" }], ok: false, hint: "" };
+  render();
+  try {
+    w.probe = await api("/api/probe", { method: "POST", body: {
+      ssh: w.host.ssh.trim(), port: w.host.port ? Number(w.host.port) : null,
+      identity: w.host.identity.trim(), accept_new: w.host.accept_new } });
+  } catch (err) {
+    w.probe = { ok: false, steps: [], hint: err.message };
   }
+  render();
 }
 
-/* —— 部署 —— */
-function viewDeploy() {
-  const sp = host().spec;
-  $("view").innerHTML = `
-    <div class="card">
-      <h2>部署参数</h2>
-      <div class="grid">
-        <div><label>部署目录</label><input id="d_dir" value="${esc(sp.dir || "")}"></div>
-        <div><label>镜像</label><input id="d_img" value="${esc(sp.image || "")}"></div>
-        <div><label>宿主机端口</label><input id="d_port" value="${esc(sp.port ?? "")}"></div>
-        <div><label>监听地址</label><input id="d_bind" value="${esc(sp.bind_ip || "")}"></div>
-        <div><label>/dev/shm（整容器共享）</label><input id="d_shm" value="${esc(sp.shm_size || "")}"></div>
-        <div><label>容器名</label><input id="d_cn" value="${esc(sp.container_name || "")}"></div>
-      </div>
-      <label style="margin-top:10px"><input type="checkbox" id="d_exp" style="width:auto"
-        ${sp.expose ? "checked" : ""}> 监听非回环地址（token 在 HTTP 上是明文，需有防火墙/VPN/TLS）</label>
-      <div class="row">
-        <button class="go" id="d_pre">体检 + 预览</button>
-        <button class="go" id="d_go">部署</button>
-      </div>
-      <div class="note">部署是幂等的：配置没变就不重建容器、不换 AUTH_TOKEN、不动 data/。</div>
-    </div>
-    <div id="pre"></div>`;
-  const spec = () => ({
-    dir: $("d_dir").value.trim(), image: $("d_img").value.trim(),
-    port: Number($("d_port").value) || null, bind_ip: $("d_bind").value.trim(),
-    shm_size: $("d_shm").value.trim(), container_name: $("d_cn").value.trim(),
-    expose: $("d_exp").checked,
-  });
-  $("d_pre").onclick = async () => {
-    $("pre").innerHTML = `<div class="card dim">体检中…</div>`;
-    try {
-      const p = await api(`/api/hosts/${CUR}/preflight`, { method: "POST", body: { spec: spec() } });
-      const mark = { ok: ["✓", "ok"], warn: ["!", "warn"], fail: ["✗", "bad"] };
-      $("pre").innerHTML = `
-        <div class="card">
-          <h2>体检</h2>
-          ${p.checks.map((c) => { const [m, k] = mark[c.level]; return `<div class="chk">
-            <span class="${k}">${m}</span> <b>${esc(c.name)}</b> ${esc(c.detail)}
-            ${c.hint ? `<div class="note">→ ${esc(c.hint)}</div>` : ""}</div>`; }).join("")}
-          ${p.warnings.length ? `<h2 style="margin-top:12px">提醒</h2>` +
-            p.warnings.map((w) => `<div class="chk warn">! ${esc(w)}</div>`).join("") : ""}
-          <h2 style="margin-top:12px">变更</h2>
-          ${p.changes.length ? p.changes.map((c) => `<div class="chk">· ${esc(c)}</div>`).join("")
-            : `<div class="chk dim">无 —— 目标机已经是这个状态</div>`}
-          ${p.commands.length ? `<h2 style="margin-top:12px">将执行</h2>` +
-            p.commands.map((c) => `<div class="chk"><code>${esc(c.join(" "))}</code></div>`).join("") : ""}
-          <details style="margin-top:12px"><summary class="dim" style="cursor:pointer">
-            将写入的文件</summary>
-          ${Object.entries(p.files).map(([f, t]) =>
-            `<h2 style="margin-top:10px">${esc(f)}</h2><div class="scroll"><pre>${esc(t)}</pre></div>`).join("")}
-          </details>
-        </div>`;
-    } catch (e) { $("pre").innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
-  };
-  $("d_go").onclick = () => {
-    clearLog(); log("开始部署，拉镜像可能要几分钟…", "dim");
-    job(`/api/hosts/${CUR}/deploy`, { spec: spec() }, (r) => {
-      log(r.summary, "ok");
-      log(`地址 ${r.url}   token 前缀 ${r.token_hint}（完整值在目标机 ${r.env_path}，权限 600）`);
-      log(`取回完整 token：sleight token --host ${CUR}`, "dim");
-      viewOverview(); TAB = "overview"; render();
-    });
-  };
+function wizardStep2() {
+  const w = S.wizard;
+  return h("div", { class: "stack" },
+    card("② 打算跑多少个浏览器实例",
+      "决定 /dev/shm 大小和监听方式。选错不致命 —— 之后改参数重新部署即可。",
+      h("div", { class: "pick" }, S.defaults.deploy_templates.map((t) =>
+        h("button", {
+          "aria-pressed": String(w.template === t.key),
+          onclick: () => {
+            w.template = t.key;
+            w.spec.shm_size = t.spec.shm_size;
+            w.spec.bind_ip = t.spec.bind_ip;
+            w.spec.expose = t.spec.expose;
+            render();
+          },
+        }, h("b", null, t.label), h("span", { class: "s1" }, t.summary),
+           h("span", { class: "s2" }, t.detail))))),
+    card("参数", "都有合理默认值，通常只需要确认部署目录。",
+      h("div", { class: "grid2" },
+        h("div", null,
+          field("deployment_name", {
+            value: w.deployment, placeholder: w.lockHost ? "second" : "default",
+            onInput: (v) => { w.deployment = v; } }),
+          field("dir", { value: w.spec.dir, onInput: (v) => { w.spec.dir = v; } }),
+          field("port", { value: w.spec.port, type: "number",
+                          onInput: (v) => { w.spec.port = Number(v) || 9000; } })),
+        h("div", null,
+          field("image", { value: w.spec.image, onInput: (v) => { w.spec.image = v; } }),
+          field("shm_size", { value: w.spec.shm_size, onInput: (v) => { w.spec.shm_size = v; } }),
+          field("bind_ip", { value: w.spec.bind_ip, onInput: (v) => { w.spec.bind_ip = v; } }))),
+      when(w.spec.expose, h("div", { class: "callout" },
+        `会监听 ${w.spec.bind_ip} —— AUTH_TOKEN 在 HTTP 上是明文的。`
+        + "前面必须有防火墙只放行任务节点，或者加 TLS 代理。")),
+      when(w.lockHost, h("div", { class: "callout ok" },
+        "同一台机上的第二个 Manager：目录和端口不能和已有的重，"
+        + "compose 项目名和容器名会自动按部署名加后缀（不加的话它会把第一个删掉）。")),
+      h("div", { class: "row", style: "margin-top:12px" },
+        when(!w.lockHost, h("button", { onclick: () => { w.step = 1; render(); } }, "← 上一步")),
+        h("button", { class: "primary", onclick: saveAndCheck }, "保存并体检 →"))));
 }
 
-/* —— profile —— */
-async function viewProfiles() {
-  $("view").innerHTML = `<div class="card dim">读取 profile…（远程会临时开一条 SSH 隧道）</div>`;
+async function saveAndCheck() {
+  const w = S.wizard;
+  const deployment = (w.deployment || "default").trim();
+  wipe();
   try {
-    const ps = await api(`/api/hosts/${CUR}/profiles`);
-    $("view").innerHTML = `
-      <div class="card">
-        <div class="scroll"><table>
-          <tr><th>id</th><th>名字</th><th>状态</th><th>tags</th><th>扩展</th><th></th></tr>
-          ${ps.map((p) => `<tr>
-            <td>${esc(String(p.id).slice(0, 8))}</td>
-            <td>${esc(p.name || "")}</td>
-            <td class="${p.status === "running" ? "ok" : "dim"}">${esc(p.status || "")}</td>
-            <td>${esc((p.tags || []).map((t) => t.tag).join(",") || "—")}</td>
-            <td>${(p.extension_paths || []).length}</td>
-            <td><button class="mini" data-a="launch" data-p="${esc(p.id)}">启动</button>
-                <button class="mini" data-a="stop" data-p="${esc(p.id)}">停止</button></td>
-          </tr>`).join("") || `<tr><td colspan="6" class="dim">还没有 profile</td></tr>`}
-        </table></div>
-        <div class="row">
-          <button class="mini" id="p_stopall">全部停止</button>
-          <button class="mini" id="p_reload">刷新</button>
-        </div>
-        <div class="note">停实例不会丢登录态 —— 那些在 /data/profiles/&lt;id&gt;/ 里。
-          真正会丢的是删 profile。</div>
-      </div>`;
-    $("p_reload").onclick = viewProfiles;
-    $("view").querySelectorAll("[data-a]").forEach((b) => b.onclick = async () => {
-      clearLog();
-      try {
-        await api(`/api/hosts/${CUR}/profiles/${b.dataset.p}/${b.dataset.a}`, { method: "POST" });
-        log("完成", "ok"); viewProfiles();
-      } catch (e) { fail(e); }
-    });
-    $("p_stopall").onclick = async () => {
-      clearLog();
-      try {
-        const r = await api(`/api/hosts/${CUR}/profiles/-/stop-all`, { method: "POST" });
-        log(`停了 ${r.stopped.length} 个`, "ok"); viewProfiles();
-      } catch (e) { fail(e); }
-    };
-  } catch (e) { $("view").innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
-}
-
-/* —— 插件 —— */
-async function viewExt() {
-  $("view").innerHTML = `<div class="card dim">读取插件…</div>`;
-  try {
-    const exts = await api(`/api/hosts/${CUR}/extensions`);
-    $("view").innerHTML = `
-      <div class="card">
-        <h2>目标机上装了什么</h2>
-        <div class="scroll"><table>
-          <tr><th>目录</th><th>名字</th><th>版本</th><th>manifest</th><th>文件</th><th>容器内路径</th></tr>
-          ${exts.map((e) => `<tr>
-            <td>${esc(e.dirname)}</td><td>${esc(e.name || "?")}</td><td>${esc(e.version || "?")}</td>
-            <td class="${e.manifest_version >= 3 ? "ok" : "bad"}">MV${e.manifest_version || "?"}</td>
-            <td>${e.files}</td><td>${esc(e.container_path)}</td></tr>`).join("")
-            || `<tr><td colspan="6" class="dim">还没有插件</td></tr>`}
-        </table></div>
-      </div>
-      <div class="card">
-        <h2>推一个上去</h2>
-        <label>控制机上的本地目录（里面要有 manifest.json）</label>
-        <input id="x_path" placeholder="/home/me/repo/plugins/bypass-paywalls-chrome-clean-master">
-        <label>目标机上的目录名（留空 = 同名）</label><input id="x_as">
-        <div class="row"><button class="go" id="x_push">推送</button></div>
-        <div class="note">推送会校验 MV3（Chromium 146 已不支持 MV2）、修好权限
-          （容器里的浏览器不是 root），并确认容器真能读到。</div>
-      </div>
-      <div class="card">
-        <h2>下发与验证</h2>
-        <div class="row">
-          <button class="go" id="x_apply">下发到全部 profile</button>
-          <button class="mini" id="x_verify">验证真的加载了</button>
-          <button class="mini" id="x_drift">查漂移</button>
-        </div>
-        <div class="note">下发会重算每个 profile 的两个 Chromium 参数（保留其它 launch_args）
-          并停掉在跑的实例 —— 参数只在浏览器启动时读。不用手动拉起，下次 lease() 会带新参数启动。</div>
-      </div>
-      <div id="x_out"></div>`;
-    $("x_push").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/push`,
-          { path: $("x_path").value.trim(), as: $("x_as").value.trim() || null },
-          () => viewExt()); };
-    $("x_apply").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/apply`, { restart: true }, (rows) => {
-        const n = rows.filter((r) => r.updated).length;
-        log(`${n}/${rows.length} 个 profile 有改动`, n ? "ok" : "dim");
-        rows.forEach((r) => log("  " + r.summary));
-      }); };
-    $("x_verify").onclick = () => { clearLog();
-      job(`/api/hosts/${CUR}/extensions/verify`, { launch: true }, (rows) =>
-        rows.forEach((r) => log(r.summary, r.ok ? "ok" : "bad"))); };
-    $("x_drift").onclick = async () => {
-      $("x_out").innerHTML = `<div class="card dim">比对中…</div>`;
-      try {
-        const d = await api(`/api/hosts/${CUR}/extensions/drift`);
-        $("x_out").innerHTML = `<div class="card">
-          <h2>漂移</h2>
-          <div class="scroll"><table>
-            <tr><th>profile</th><th>状态</th><th>已配</th><th>缺</th><th>多余</th></tr>
-            ${d.profiles.map((p) => `<tr><td>${esc(p.name || p.id)}</td><td>${esc(p.status)}</td>
-              <td>${p.configured.length}</td>
-              <td class="${p.missing.length ? "bad" : "dim"}">${esc(p.missing.map((m) =>
-                m.split("/").pop()).join(", ") || "—")}</td>
-              <td class="${p.unknown.length ? "warn" : "dim"}">${esc(p.unknown.map((u) =>
-                u.split("/").pop()).join(", ") || "—")}</td></tr>`).join("")}
-          </table></div>
-          <div class="note ${d.consistent ? "ok" : "bad"}">${d.consistent
-            ? "一致：每个 profile 都配了目标机上装的全部插件。"
-            : "不一致。lease() 随机租实例，漏掉的那台会造成概率性失败（症状就是「有时候能过付费墙，有时候不能」）。点上面的「下发到全部 profile」修。"}</div>
-        </div>`;
-      } catch (e) { $("x_out").innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
-    };
-  } catch (e) { $("view").innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
-}
-
-/* ---------- 启动 ---------- */
-(async () => {
-  const url = new URLSearchParams(location.search);
-  const saved = url.get("token") || localStorage.getItem("sleight_ui_token") || "";
-  $("tok").value = saved;
-  $("tok").onchange = () => { localStorage.setItem("sleight_ui_token", token()); loadHosts(); };
-  try {
-    DEFAULTS = await api("/api/defaults");
-    $("ver").textContent = "v" + DEFAULTS.version;
-    $("tokwrap").hidden = !DEFAULTS.auth;
-    if (saved) localStorage.setItem("sleight_ui_token", saved);
-    $("h_dir").placeholder = DEFAULTS.spec.dir;
+    if (!w.saved) {
+      if (w.lockHost) {
+        await api("/api/deployments", { method: "POST", body: {
+          host: w.host.name, name: deployment, spec: w.spec } });
+      } else {
+        await api("/api/hosts", { method: "POST", body: {
+          name: w.host.name.trim(), ssh: w.host.ssh.trim(),
+          port: w.host.port ? Number(w.host.port) : null, identity: w.host.identity.trim(),
+          sudo: w.host.sudo, accept_new: w.host.accept_new, notes: w.host.notes.trim(),
+          deployment, deploy: w.spec } });
+      }
+      w.saved = true;
+      log("已存进本地库", "ok");
+    }
+    S.ref = `${w.host.name.trim()}/${deployment}`;
     await loadHosts();
+    w.step = 3;
+    w.plan = null;
     render();
-  } catch (e) {
-    document.body.insertAdjacentHTML("afterbegin",
-      `<div class="card bad" style="margin:14px">${esc(e.message)}
-       —— 口令不对的话在右上角填一下。</div>`);
-    $("tokwrap").hidden = false;
+    w.plan = await api(url("/preflight"), { method: "POST", body: { spec: w.spec } });
+    render();
+  } catch (err) {
+    oops(err);
+    w.saved = false;
   }
-})();
+}
+
+function wizardStep3() {
+  const w = S.wizard;
+  if (!w.plan) return card("③ 体检中", "正在连上去看环境…");
+  return h("div", { class: "stack" },
+    card("③ 体检结果", w.plan.blocked ? "有硬性问题，解决了再部署。" : "可以部署了。",
+      checkList(w.plan.checks),
+      when(w.plan.warnings.length,
+        h("div", { class: "callout", style: "margin-top:12px" }, w.plan.warnings.join("\n"))),
+      h("div", { class: "row", style: "margin-top:14px" },
+        h("button", { onclick: () => { w.step = 2; render(); } }, "← 改参数"),
+        h("button", {
+          class: "primary", disabled: w.plan.blocked,
+          onclick: () => startDeploy(w.spec, false),
+        }, w.plan.blocked ? "先解决上面的问题" : "开始部署"),
+        when(w.plan.blocked, h("button", {
+          class: "danger", onclick: () => startDeploy(w.spec, true),
+        }, "无视并强制部署")))),
+    filesPanel(w.plan.files));
+}
+
+function startDeploy(spec, force) {
+  wipe();
+  log("开始部署。目标机上没有镜像的话要拉 1.6 GB，可能几分钟。", "dim");
+  runJob(url("/deploy"), { spec, force }, (r) => {
+    log(r.summary, "ok");
+    log("地址 " + r.url, "ok");
+    log("token 在目标机 " + r.env_path + "（权限 600）—— 概览页点「显示 token」取完整值", "dim");
+    S.wizard = null;
+    S.tab = "overview";
+    resetCache();
+    loadHosts().then(render);
+  });
+}
+
+const filesPanel = (files) => card("将要写到目标机上的文件", "这就是真正落盘的字节，不是示意。",
+  Object.entries(files).map(([path, text]) =>
+    h("details", { style: "margin-bottom:6px" },
+      h("summary", { class: "mono", style: "cursor:pointer" }, path),
+      h("div", { class: "scroll" }, h("pre", { class: "mono" }, text)))));
+
+/* ========================================================================== *
+ * 7. 概览
+ * ========================================================================== */
+
+function overviewView() {
+  if (cache.status === null) { fetchStatus(); return card(null, null, "读取状态…"); }
+  if (cache.status.error) return card("读不到状态", cache.status.error);
+
+  const state = cache.status;
+  const container = state.container;
+  const manager = state.api || {};
+  const running = container.status === "running";
+  const level = running ? "ok" : container.status === "absent" ? "idle" : "bad";
+  const record = entry();
+
+  return h("div", { class: "stack" },
+    card(null, null,
+      h("div", { class: "row", style: "justify-content:space-between;margin-bottom:14px" },
+        h("div", { class: "row" }, h("h2", null, S.ref),
+          badge(level, running ? "运行中 · " + container.health
+                : container.status === "absent" ? "还没部署" : container.status)),
+        h("div", { class: "row" },
+          h("button", { class: "sm", onclick: () => fetchStatus(true) }, "刷新"),
+          h("button", { class: "sm", onclick: showToken }, "显示 token"),
+          h("button", { class: "sm", onclick: showLogs }, "容器日志"),
+          h("button", { class: "sm", onclick: showHistory }, "操作流水"))),
+      h("dl", { class: "kv" },
+        h("dt", null, "目标机"), h("dd", null, state.target),
+        h("dt", null, "部署目录"), h("dd", null, state.dir),
+        h("dt", null, "镜像"), h("dd", null, container.image || "—"),
+        h("dt", null, "端口映射"), h("dd", null, (state.ports || []).join("  ") || "—"),
+        h("dt", null, "Manager"), h("dd", null, manager.binary_version
+          ? `浏览器内核 ${manager.binary_version} · 实例 ${manager.profiles_total} 个`
+            + ` · 运行中 ${manager.running_count} 个`
+          : "/api/status 无响应"),
+        h("dt", null, "上次部署"), h("dd", null, (record && record.deployed_at) || "从未"))),
+
+    when(container.status === "absent",
+      card("还没部署", "这条记录里已经有配置了，但目标机上还没有容器。",
+        h("button", { class: "primary", onclick: () => { S.tab = "deploy"; render(); } },
+          "去部署 →"))),
+
+    when(running, card("运维", "",
+      h("div", { class: "row" },
+        h("button", { onclick: () => { wipe();
+          runJob(url("/backup"), {}, (r) => log("归档 " + r.archive, "ok")); } }, "停机备份"),
+        h("button", { onclick: () => { wipe();
+          runJob(url("/rollback"), {}, (r) => log(r.summary, "ok")); } }, "回滚到上一个镜像")),
+      h("div", { class: "field", style: "margin-top:14px;margin-bottom:0" },
+        h("label", null, "升级到指定镜像"),
+        h("div", { class: "why" },
+          "默认先做一次停机备份。升级后自己验收：实例数量和 ID 未变、抽样实例能启动并过 CDP。"),
+        h("div", { class: "row" },
+          h("input", { id: "up_image", type: "text", style: "flex:1;min-width:240px",
+                       placeholder: S.defaults.default_image }),
+          h("button", { onclick: () => {
+            const image = $("#up_image").value.trim();
+            if (!image) { oops(new Error("先填要升级到的镜像")); return; }
+            wipe();
+            runJob(url("/upgrade"), { image, backup: true }, (r) => {
+              log(r.summary, "ok"); fetchStatus(true);
+            });
+          } }, "升级"))))));
+}
+
+async function fetchStatus(force) {
+  if (force) cache.status = null;
+  try { cache.status = await api(url("/status")); }
+  catch (err) { cache.status = { error: err.message }; }
+  render();
+}
+
+async function showToken() {
+  wipe();
+  try {
+    const info = await api(url("/token"));
+    log("Manager 没有用户名密码，这个 token 就是唯一凭据：");
+    LOG.append(h("p", null, copyable(info.token)));
+    log("目标机上   " + info.url + "（远程的话先 sleight tunnel）", "dim");
+    log("它存在     " + info.env_path + "（权限 600）", "dim");
+  } catch (err) { oops(err); }
+}
+
+async function showLogs() {
+  wipe(); log("读取容器日志…", "dim");
+  try { const r = await api(url("/logs", { tail: 200 })); wipe(); log(r.text || "(空)"); }
+  catch (err) { oops(err); }
+}
+
+async function showHistory() {
+  wipe();
+  try {
+    const host = encodeURIComponent(S.ref.split("/")[0]);
+    const rows = await api(`/api/events?host=${host}&limit=40`);
+    if (!rows.length) { log("还没有流水。", "dim"); return; }
+    for (const e of rows) {
+      log(`${e.ts}  ${e.host}${e.deployment ? "/" + e.deployment : ""}  ${e.kind}  `
+          + `${e.ok ? "成功" : "失败"}  ${e.detail || ""}`, e.ok ? "" : "bad");
+    }
+  } catch (err) { oops(err); }
+}
+
+/* ========================================================================== *
+ * 8. 部署
+ * ========================================================================== */
+
+const drafts = {};
+function deployView() {
+  const record = entry();
+  if (!record) return card(null, null, "先选一个目标");
+  const draft = drafts[S.ref] || (drafts[S.ref] = { ...record.spec });
+
+  return h("div", { class: "stack" },
+    card("部署参数", "改完先预览 —— 它把真正会写的文件全文打出来。部署是幂等的："
+      + "配置没变、容器在跑，它连 up -d 都不发。",
+      h("div", { class: "grid2" },
+        h("div", null,
+          field("dir", { value: draft.dir, onInput: (v) => { draft.dir = v; } }),
+          field("image", { value: draft.image, onInput: (v) => { draft.image = v; } }),
+          field("port", { value: draft.port, type: "number",
+                          onInput: (v) => { draft.port = Number(v) || 9000; } })),
+        h("div", null,
+          field("bind_ip", { value: draft.bind_ip, onInput: (v) => { draft.bind_ip = v; } }),
+          field("shm_size", { value: draft.shm_size, onInput: (v) => { draft.shm_size = v; } }),
+          field("container_name", { value: draft.container_name,
+                                    onInput: (v) => { draft.container_name = v; } }))),
+      checkbox("expose", draft.expose, (v) => { draft.expose = v; scheduleRender(); }),
+      h("div", { class: "row" },
+        h("button", { onclick: async () => {
+          wipe(); log("体检中…", "dim");
+          try {
+            cache.plan = await api(url("/preflight"), { method: "POST", body: { spec: draft } });
+            wipe(); render();
+          } catch (err) { oops(err); }
+        } }, "体检 + 预览"),
+        h("button", { class: "primary", onclick: () => {
+          wipe(); runJob(url("/deploy"), { spec: draft }, (r) => {
+            log(r.summary, "ok"); fetchStatus(true);
+          });
+        } }, "部署"))),
+    ...(cache.plan ? [planPanel(cache.plan), filesPanel(cache.plan.files)] : []));
+}
+
+const planPanel = (plan) => card("体检与变更",
+  plan.up_to_date ? "目标机已经是这个状态，不会动容器。" : "",
+  checkList(plan.checks),
+  when(plan.changes.length, h("div", { style: "margin-top:14px" },
+    h("div", { class: "eyebrow" }, "将发生的变更"),
+    plan.changes.map((c) => h("div", { class: "chk" }, h("span", { class: "m" }, "·"), c)))),
+  when(plan.commands.length, h("div", { style: "margin-top:14px" },
+    h("div", { class: "eyebrow" }, "将执行"),
+    plan.commands.map((c) => h("div", { class: "mono", style: "padding:1px 0" },
+      "$ " + c.join(" "))))));
+
+/* ========================================================================== *
+ * 9. 实例
+ * ========================================================================== */
+
+const newProfile = { name: "", preset: "windows_us", proxy: "", tags: "",
+                     geoip: false, headless: false, screen: "1920x1080" };
+
+function profilesView() {
+  if (cache.profiles === null) {
+    fetchProfiles();
+    return card(null, null, "读取实例…（远程会临时开一条 SSH 隧道）");
+  }
+  if (cache.profiles.error) {
+    return card("读不到实例", cache.profiles.error,
+      h("div", { class: "tiny muted" },
+        "多半是这个目标还没部署过 Manager —— 先去「部署」。"));
+  }
+  return h("div", { class: "stack" }, newProfileCard(), profileListCard(cache.profiles));
+}
+
+async function fetchProfiles(force) {
+  if (force) cache.profiles = null;
+  try { cache.profiles = await api(url("/profiles")); }
+  catch (err) { cache.profiles = { error: err.message }; }
+  render();
+}
+
+const newProfileCard = () => h("details", { class: "card" },
+  h("summary", { style: "cursor:pointer;font-weight:600" }, "＋ 新建实例"),
+  h("div", { class: "sub", style: "margin-top:10px" }, helpOf("preset").why),
+  h("div", { class: "pick", style: "margin-bottom:16px" }, S.defaults.profile_presets.map((p) =>
+    h("button", {
+      "aria-pressed": String(newProfile.preset === p.key),
+      onclick: () => { newProfile.preset = p.key; render(); },
+    }, h("b", null, p.label), h("span", { class: "s1" }, p.summary),
+       h("span", { class: "s2" }, `${p.platform} · ${p.timezone} · ${p.locale}`)))),
+  h("div", { class: "grid2" },
+    h("div", null,
+      field("profile_name", { value: newProfile.name, placeholder: "news-us-01",
+                              onInput: (v) => { newProfile.name = v; } }),
+      field("proxy", { value: newProfile.proxy, placeholder: "socks5://user:pass@host:1080",
+                       onInput: (v) => { newProfile.proxy = v; } }),
+      field("tags", { value: newProfile.tags, placeholder: "us,news",
+                      onInput: (v) => { newProfile.tags = v; } })),
+    h("div", null,
+      field("screen", { value: newProfile.screen, placeholder: "1920x1080",
+                        onInput: (v) => { newProfile.screen = v; } }),
+      checkbox("geoip", newProfile.geoip, (v) => { newProfile.geoip = v; }),
+      checkbox("headless", newProfile.headless, (v) => { newProfile.headless = v; }))),
+  h("div", { class: "row" },
+    h("button", { class: "primary", onclick: createProfile }, "创建"),
+    h("span", { class: "tiny muted" }, "同名会被更新而不是再建一个；建好不自动启动")));
+
+async function createProfile() {
+  wipe();
+  const [width, height] = (newProfile.screen || "1920x1080").split("x").map(Number);
+  try {
+    const created = await api(url("/profiles"), { method: "POST", body: {
+      name: newProfile.name.trim(), preset: newProfile.preset,
+      proxy: newProfile.proxy.trim(), tags: newProfile.tags,
+      geoip: newProfile.geoip, headless: newProfile.headless,
+      screen_width: width || 1920, screen_height: height || 1080 } });
+    log(`已创建实例 ${created.name}（${created.id}）`, "ok");
+    fetchProfiles(true);
+  } catch (err) { oops(err); }
+}
+
+function profileListCard(rows) {
+  if (!rows.length) {
+    return card(null, null, h("div", { class: "empty" },
+      h("h3", null, "这个 Manager 上还没有实例"),
+      h("div", null, "用上面的「新建实例」建一个。")));
+  }
+  return card("实例", `${rows.length} 个。点名字展开完整配置。`,
+    h("div", { class: "scroll" }, h("table", null,
+      h("tr", null, ["名字", "状态", "标签", "扩展", "操作"].map((t) => h("th", null, t))),
+      rows.map((p) => {
+        const on = p.status === "running";
+        return h("tr", null,
+          h("td", null, h("details", null,
+            h("summary", { style: "cursor:pointer;font-weight:600" }, p.name || p.id),
+            h("dl", { class: "kv", style: "margin-top:8px" },
+              h("dt", null, "id"), h("dd", null, p.id),
+              h("dt", null, "身份"), h("dd", null,
+                `${p.platform || "?"} · ${p.timezone || "?"} · ${p.locale || "?"}`),
+              h("dt", null, "代理"), h("dd", null, p.proxy || "—"),
+              h("dt", null, "分辨率"), h("dd", null,
+                `${p.screen_width || "?"}×${p.screen_height || "?"}`),
+              h("dt", null, "launch_args"), h("dd", null,
+                (p.launch_args || []).join("\n") || "—")))),
+          h("td", null, badge(on ? "ok" : "idle", on ? "运行中" : "停止")),
+          h("td", { class: "mono" }, (p.tags || []).map((t) => t.tag).join(",") || "—"),
+          h("td", { class: "mono" }, String((p.extension_paths || []).length)),
+          h("td", null, h("div", { class: "row", style: "gap:5px" },
+            h("button", { class: "sm", onclick: () => profileAction(p.id, on ? "stop" : "launch") },
+              on ? "停止" : "启动"),
+            h("button", { class: "sm danger", onclick: () => dropProfile(p) }, "删除"))));
+      }))),
+    h("div", { class: "row", style: "margin-top:12px" },
+      h("button", { class: "sm", onclick: () => profileAction("-", "stop-all") }, "全部停止"),
+      h("button", { class: "sm", onclick: () => fetchProfiles(true) }, "刷新"),
+      h("span", { class: "tiny muted" },
+        "停止不丢登录态（在 /data/profiles/<id>/ 里），删除才会丢")));
+}
+
+async function profileAction(pid, action) {
+  wipe(); log(action + "…（拉起一个实例要几十秒）", "dim");
+  try {
+    await api(url(`/profiles/${encodeURIComponent(pid)}/${action}`), { method: "POST" });
+    log("完成", "ok");
+    fetchProfiles(true);
+  } catch (err) { oops(err); }
+}
+
+async function dropProfile(p) {
+  const typed = window.prompt(
+    `删除实例会连它的登录态一起删掉，不可逆。\n确认请把名字原样输入：${p.name}`, "");
+  if (typed === null) return;
+  wipe();
+  try {
+    await api(url(`/profiles/${encodeURIComponent(p.id)}`, { confirm: typed }),
+              { method: "DELETE" });
+    log("已删除 " + p.name, "bad");
+    fetchProfiles(true);
+  } catch (err) { oops(err); }
+}
+
+/* ========================================================================== *
+ * 10. 插件
+ * ========================================================================== */
+
+function extView() {
+  if (cache.ext === null) { fetchExt(); return card(null, null, "读取插件…"); }
+  return h("div", { class: "stack" },
+    card("目标机上装了什么",
+      "参数里填的是**容器内**路径。填宿主机路径 Chromium 会静默不加载 —— "
+      + "两者只差一个前缀，是最常见的错。",
+      cache.ext.length
+        ? h("div", { class: "scroll" }, h("table", null,
+            h("tr", null, ["目录", "名字", "版本", "manifest", "文件", "容器内路径"]
+              .map((t) => h("th", null, t))),
+            cache.ext.map((e) => h("tr", null,
+              h("td", { class: "mono" }, e.dirname),
+              h("td", null, e.name || "?"),
+              h("td", { class: "mono" }, e.version || "?"),
+              h("td", null, badge(e.manifest_version >= 3 ? "ok" : "bad",
+                                  "MV" + (e.manifest_version || "?"))),
+              h("td", { class: "mono" }, String(e.files)),
+              h("td", { class: "mono" }, e.container_path)))))
+        : h("div", { class: "empty" }, h("h3", null, "还没有插件"),
+            h("div", null, "用下面那栏推一个上去。"))),
+
+    card("推一个上去",
+      "先在本地校验 MV3（Chromium 146 不支持 MV2，传上去也不会加载），"
+      + "传完自动 chmod 修权限，再从容器里读一次 manifest 确认真读得到。",
+      h("div", { class: "grid2" },
+        h("div", { class: "field" },
+          h("label", null, "控制机上的本地目录"),
+          h("div", { class: "why" }, "里面要有 manifest.json。是**这台机器**上的路径，不是目标机的。"),
+          h("input", { id: "x_path", type: "text",
+                       placeholder: "/home/me/repo/plugins/bypass-paywalls-chrome-clean-master" })),
+        h("div", { class: "field" },
+          h("label", null, "目标机上的目录名"),
+          h("div", { class: "why" }, "留空就用本地目录名。"),
+          h("input", { id: "x_as", type: "text", placeholder: "留空 = 同名" }))),
+      h("button", { class: "primary", onclick: () => {
+        wipe();
+        runJob(url("/extensions/push"), {
+          path: $("#x_path").value.trim(), as: $("#x_as").value.trim() || null,
+        }, () => fetchExt(true));
+      } }, "推送")),
+
+    card("下发与验证",
+      "下发会重算每个实例的两个 Chromium 参数（保留其它 launch_args）并停掉在跑的实例 —— "
+      + "参数只在浏览器启动时读。不用手动拉起，下次 lease() 会带新参数启动。",
+      h("div", { class: "row" },
+        h("button", { class: "primary", onclick: () => {
+          wipe();
+          runJob(url("/extensions/apply"), { restart: true }, (rows) => {
+            const changed = rows.filter((r) => r.updated).length;
+            log(`${changed}/${rows.length} 个实例有改动`, changed ? "ok" : "dim");
+            for (const r of rows) log("  " + r.summary);
+          });
+        } }, "下发到全部实例"),
+        h("button", { onclick: () => {
+          wipe(); log("会拉起实例并等 service worker 起来，要几十秒。", "dim");
+          runJob(url("/extensions/verify"), { launch: true },
+                 (rows) => rows.forEach((r) => log(r.summary, r.ok ? "ok" : "bad")));
+        } }, "验证真的加载了"),
+        h("button", { onclick: showDrift }, "查漂移"))));
+}
+
+async function fetchExt(force) {
+  if (force) cache.ext = null;
+  try { cache.ext = await api(url("/extensions")); }
+  catch (err) { cache.ext = []; oops(err); }
+  render();
+}
+
+async function showDrift() {
+  wipe();
+  try {
+    const report = await api(url("/extensions/drift"));
+    for (const p of report.profiles) {
+      const missing = p.missing.map((m) => m.split("/").pop()).join(",") || "—";
+      log(`${p.name || p.id}   已配 ${p.configured.length}   缺 ${missing}`,
+          p.missing.length ? "bad" : "");
+    }
+    log(report.consistent
+      ? "一致：每个实例都配了目标机上装的全部插件。"
+      : "不一致。lease() 随机租实例，漏掉的那台会造成概率性失败 —— 点「下发到全部实例」修。",
+      report.consistent ? "ok" : "bad");
+  } catch (err) { oops(err); }
+}
+
+/* ========================================================================== *
+ * 11. 危险区 —— 三种「删」的作用范围完全不同
+ * ========================================================================== */
+
+function dangerView() {
+  const host = hostOf();
+  const implicit = Boolean(host && host.implicit);
+  const running = Boolean(cache.status && cache.status.container
+                          && cache.status.container.status === "running");
+
+  return h("div", { class: "stack" },
+    h("div", { class: "callout" },
+      "这里有三种「删」，作用范围完全不同：\n"
+      + "①  删容器 —— 目标机上的容器没了，data/ 还在，重新部署即可恢复\n"
+      + "②  删 data/ —— 登录态一起没，不可逆\n"
+      + "③  删记录 —— 只是这台控制机不再记得它，目标机毫发无伤"),
+
+    card("① 停并删容器", "data/ 原封不动，登录态都还在。",
+      h("button", { class: "danger", onclick: () => {
+        wipe();
+        runJob(url("/destroy"), { purge_data: false }, () => {
+          log("容器已删，data/ 保留", "ok"); fetchStatus(true);
+        });
+      } }, "停并删容器")),
+
+    card("② 连 data/ 一起删",
+      "不可逆。实例数据库、指纹种子、Cookie 和全部登录态一起消失。",
+      h("div", { class: "field" },
+        h("label", null, "确认"),
+        h("div", { class: "why" }, `把 ${S.ref} 原样输入才会执行。`),
+        h("input", { id: "purge_confirm", type: "text", placeholder: S.ref })),
+      h("button", { class: "danger primary", onclick: () => {
+        wipe();
+        runJob(url("/destroy"), {
+          purge_data: true, confirm: $("#purge_confirm").value.trim(),
+        }, () => { log("容器和 data/ 都删了", "bad"); fetchStatus(true); });
+      } }, "连 data/ 一起删")),
+
+    card("③ 只删本地记录", "目标机上的东西一点不碰。",
+      when(implicit, h("div", { class: "callout" },
+        "「本机」是内置目标，删不掉 —— 删了列表里还会有它。它不占用任何资源。")),
+      when(running && !implicit, h("div", { class: "callout" },
+        "目标机上的容器还在跑。只删记录的话它会变成没人管的孤儿 —— "
+        + "以后要拆就得手工上去。建议先用上面的①。")),
+      h("div", { class: "row" },
+        h("button", { class: "danger", disabled: implicit, onclick: dropDeployment },
+          "删这条部署记录"),
+        h("button", { class: "danger", disabled: implicit, onclick: dropHost },
+          "删整台主机的记录"))));
+}
+
+async function dropDeployment() {
+  const [host, deployment] = S.ref.split("/");
+  if (!window.confirm(`只从本地库删掉 ${S.ref}。目标机上的容器和数据不受影响。`)) return;
+  wipe();
+  try {
+    await api(`/api/deployments/${encodeURIComponent(host)}/${encodeURIComponent(deployment)}`,
+              { method: "DELETE" });
+    log("已删掉这条部署记录（目标机没动）", "ok");
+    S.ref = null; resetCache(); await loadHosts(); render();
+  } catch (err) { oops(err); }
+}
+
+async function dropHost() {
+  const host = S.ref.split("/")[0];
+  if (!window.confirm(`连同 ${host} 下的全部部署记录一起删。目标机不受影响。`)) return;
+  wipe();
+  try {
+    await api(`/api/hosts/${encodeURIComponent(host)}`, { method: "DELETE" });
+    log("整台主机的记录都删了（目标机没动）", "ok");
+    S.ref = null; resetCache(); await loadHosts(); render();
+  } catch (err) { oops(err); }
+}
+
+/* ========================================================================== *
+ * 12. 侧栏与渲染
+ * ========================================================================== */
+
+function sidebar() {
+  return h("aside", null,
+    h("div", { class: "eyebrow" }, "目标"),
+    S.hosts.map((host) => h("div", { class: "hostgroup" },
+      h("div", { class: "name" },
+        host.local ? "🖥" : "🌐", host.name,
+        when(host.implicit, badge("idle", "内置")),
+        when(host.notes, h("span", { class: "tiny muted", style: "font-weight:400" }, host.notes))),
+      (host.deployments || []).map((d) => h("button", {
+        class: "target", "aria-current": String(S.ref === d.ref),
+        onclick: () => {
+          S.ref = d.ref; S.tab = "overview"; S.wizard = null; resetCache(); render();
+        },
+      }, h("b", null, d.name),
+         h("span", { class: "meta" }, `${d.spec.dir}:${d.spec.port}`),
+         h("span", { class: "meta" },
+           d.deployed_at ? "部署于 " + d.deployed_at.slice(0, 16).replace("T", " ") : "从未部署"))),
+      when(!host.implicit, h("button", {
+        class: "ghost sm", style: "margin-left:6px",
+        onclick: () => startWizard({
+          name: host.name, ssh: host.ssh, port: host.port || "", identity: host.identity,
+          sudo: host.sudo, accept_new: false, notes: host.notes }),
+      }, "＋ 这台机上再加一个")))),
+    h("button", { class: "primary", style: "width:100%;margin-top:6px",
+                  onclick: () => startWizard(null) }, "＋ 添加目标机"));
+}
+
+const TABS = [["overview", "概览"], ["deploy", "部署"], ["profiles", "实例"],
+              ["ext", "插件"], ["danger", "危险区"]];
+
+function body() {
+  if (S.tab === "wizard") return wizardView();
+  if (!S.ref) {
+    return h("div", { class: "empty" },
+      h("h3", null, "先添加一台目标机"),
+      h("div", null, "目标机需要 docker 和 compose v2；远程还要 sshd。那台机上不用装 sleight。"),
+      h("div", { style: "margin-top:16px" },
+        h("button", { class: "primary", onclick: () => startWizard(null) }, "开始引导")));
+  }
+  const views = { overview: overviewView, deploy: deployView, profiles: profilesView,
+                  ext: extView, danger: dangerView };
+  return h("div", null,
+    h("nav", { class: "tabs" }, TABS.map(([key, label]) =>
+      h("button", { "aria-current": String(S.tab === key),
+                    onclick: () => { S.tab = key; render(); } }, label))),
+    views[S.tab]());
+}
+
+function render() {
+  clear($("#app")).append(
+    h("header", null,
+      h("h1", null, "sleight deploy"),
+      h("span", { class: "ver" }, S.defaults ? "v" + S.defaults.version : ""),
+      h("span", { class: "spacer" }),
+      when(S.defaults && S.defaults.auth, h("input", {
+        type: "text", value: S.token, placeholder: "访问口令", style: "width:170px",
+        onchange: (e) => {
+          S.token = e.target.value.trim();
+          localStorage.setItem("sleight_ui_token", S.token);
+          boot();
+        },
+      })),
+      themeToggle()),
+    h("main", null, sidebar(),
+      h("section", { class: "body" }, body(),
+        h("div", { style: "margin-top:22px" }, h("div", { class: "eyebrow" }, "日志"), LOG))));
+}
+
+/** 合并同一帧内的多次重绘，避免输入时整树重建打断打字。 */
+let queued = false;
+function scheduleRender() {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; render(); });
+}
+
+const loadHosts = async () => { S.hosts = await api("/api/hosts"); };
+
+async function boot() {
+  try {
+    S.defaults = await api("/api/defaults");
+    await loadHosts();
+    if (!S.ref) {
+      // 优先选一个部署过的；一个都没部署过就选第一个 —— 空状态只留给"真的一台都没有"
+      const all = allDeployments();
+      S.ref = (all.find((d) => d.deployed_at) || all[0] || {}).ref || null;
+    }
+    render();
+  } catch (err) {
+    clear($("#app")).append(h("div", { class: "empty" },
+      h("h3", null, "连不上后端"), h("div", null, err.message),
+      h("div", { class: "tiny muted", style: "margin-top:10px" },
+        "启动时给了 --token 的话，在右上角填一下。")));
+  }
+}
+
+const fromUrl = new URLSearchParams(location.search).get("token");
+if (fromUrl) { S.token = fromUrl; localStorage.setItem("sleight_ui_token", fromUrl); }
+boot();
 </script>
 </body>
 </html>

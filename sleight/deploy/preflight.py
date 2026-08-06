@@ -170,6 +170,7 @@ def preflight(spec: DeploySpec, runner: Runner, *, sudo: bool = False) -> list[C
                   hint=hint))
         return checks                                  # 没 docker 后面的检查都没意义
     add(Check("docker", CheckLevel.OK, f"engine {version.text}"))
+    add(_check_context(runner))
 
     compose = runner.run(["docker", "compose", "version", "--short"])
     if not compose.ok:
@@ -319,6 +320,33 @@ def _check_image(spec: DeploySpec, runner: Runner) -> Check:
     where = "already pulled" if local.ok else "will be pulled"
     pin = "digest-pinned" if digest else f"tag {tag!r}"
     return Check("image", CheckLevel.OK, f"{spec.image} — {pin}, {where}")
+
+
+def _check_context(runner: Runner) -> Check:
+    """docker CLI 到底在跟哪个 daemon 说话。
+
+    ``docker`` 会跟随当前 context。设过一个远程 context 的话，"本机部署"会**悄悄**
+    发到别的机器上 —— 而这里其余每一项（uname、目录、端口、内存）量的都是 runner
+    所在的那台机。两者不一致时，你会对着一台机器排查另一台机器的问题。
+    """
+    context = runner.run(["docker", "context", "show"])
+    name = context.text if context.ok else "default"
+    if name in ("", "default"):
+        return Check("context", CheckLevel.OK, "docker context = default（就是这台机）")
+
+    endpoint = runner.run(
+        ["docker", "context", "inspect", name, "--format", "{{.Endpoints.docker.Host}}"]
+    )
+    where = endpoint.text if endpoint.ok else "?"
+    return Check(
+        "context", CheckLevel.WARN,
+        f"docker context = {name!r} → {where}",
+        hint=(
+            "docker 命令会发到那个 endpoint，而不是本次体检量的这台机器；两者不一致的话"
+            "你会对着一台机器排查另一台的问题。要用本机就 docker context use default，"
+            "或者 DOCKER_CONTEXT=default sleight …"
+        ),
+    )
 
 
 def _check_registry(runner: Runner) -> Check:

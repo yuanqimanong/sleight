@@ -18,10 +18,11 @@ python 单行命令，收成了可重跑的子命令。
 
 - [1. 三分钟](#1-三分钟)
 - [2. 装什么](#2-装什么)
-- [3. 目标机怎么指定](#3-目标机怎么指定)
+- [3. 目标机怎么指定](#3-目标机怎么指定)（本地 SQLite、一台机多个 Manager）
 - [4. 部署](#4-部署)
 - [5. 日常运维](#5-日常运维)
 - [6. 浏览器插件](#6-浏览器插件)
+- [6.5 模板与实例](#65-模板与实例)
 - [7. Web 界面](#7-web-界面)
 - [8. 内建的护栏](#8-内建的护栏)
 - [9. 当库来用](#9-当库来用)
@@ -34,7 +35,7 @@ python 单行命令，收成了可重跑的子命令。
 **本机**（这台机器上有 docker）：
 
 ```bash
-sleight deploy --dir ~/cloakbrowser-manager
+sleight deploy --dir ~/cloakbrowser-manager   # shell 会展开 ~
 ```
 
 **远程**：
@@ -79,40 +80,88 @@ ssh-agent、`known_hosts` 全都照常生效 —— 你平时怎么连，sleight
 
 ## 3. 目标机怎么指定
 
-三种写法，优先级从左到右递增：
+三种写法：
 
 ```bash
-sleight status                          # 本机
-sleight status --ssh deploy@1.2.3.4     # 临时指定
-sleight status --host hk-01             # 用 ~/.sleight/hosts.toml 里配好的
+sleight status                           # 本机，临时的，不进库
+sleight status --ssh deploy@1.2.3.4      # 临时指定一台，不进库
+sleight status --host hk-01              # 库里配好的
+sleight status --host hk-01/second       # 那台机上的第二个 Manager
 ```
 
-配一台常用的：
+### 本地 SQLite
+
+主机、每台机上有哪几个 Manager、以及部署流水，都存在 `~/.sleight/sleight.db`
+（`$SLEIGHT_HOME` 可改）。三张表：
+
+| 表 | 存什么 |
+|---|---|
+| `hosts` | SSH 连接信息（地址、端口、私钥、要不要 sudo） |
+| `deployments` | **一台主机上的 N 个 Manager**：目录、端口、镜像、容器名，加上最后一次部署的时间和状态快照 |
+| `events` | 部署 / 升级 / 备份 / 销毁 / 插件下发的流水 |
+
+> 0.2.x 的 `hosts.toml` 会在第一次用到时**自动导入**，原文件改名成
+> `hosts.toml.imported` 留在原地。不用手工迁移。
+
+**库里没有 token。** 每台机的 `AUTH_TOKEN` 就在它自己的 `.env`（600）里 —— 能 SSH
+上去就能读到，控制机上再存一份只是多一个泄漏点。要用时 `sleight token --host hk-01`。
+
+### 记一台机
 
 ```bash
-sleight hosts add hk-01 --ssh deploy@1.2.3.4 --ssh-port 22 --identity ~/.ssh/id_ed25519 --dir /srv/cloakbrowser-manager --port 9000 --sudo
+sleight hosts add hk-01 --ssh deploy@1.2.3.4 --ssh-port 22 --identity ~/.ssh/id_ed25519 --dir /srv/cloakbrowser-manager --port 9000 --sudo --notes "香港那台"
 ```
 
-写出来是这样，手改也行：
+这条同时建了一个叫 `default` 的部署 —— 一台没有部署记录的主机是没法用的
+（`deploy --host X` 不知道往哪个目录发）。
 
-```toml
-[hosts.hk-01]
-ssh = "deploy@1.2.3.4"
-port = 22
-identity = "~/.ssh/id_ed25519"
-sudo = true
-
-[hosts.hk-01.deploy]
-dir = "/srv/cloakbrowser-manager"
-port = 9000
+```bash
+sleight hosts ls
+sleight hosts rm hk-01        # 只删记录，目标机上的东西一点不动
 ```
 
-`[hosts.X.deploy]` 里可以放 `DeploySpec` 的任意字段（`image`、`shm_size`、`bind_ip`、
-`container_name`…）。命令行参数覆盖它，**没给的参数不会把配置里的值打掉**。
+### 一台机上跑第二个 Manager
 
-> **清单里没有 token。** 每台机的 `AUTH_TOKEN` 就在它自己的 `.env`（权限 600）里 ——
-> 能 SSH 上去就能读到，控制机上再存一份只是多一个泄漏点。要用时 `sleight token
-> --host hk-01` 现取。
+```bash
+sleight deployments add hk-01 second --dir /srv/cbm-second --port 9001
+sleight deployments ls
+sleight deploy --host hk-01/second
+```
+
+**compose 项目名和容器名会自动按部署名加后缀**（`cloakbrowser-second` /
+`cloakbrowser-manager-second`）。不加的话第二个 `docker compose up` 会把第一个
+Manager 的容器当成同项目的旧实例**直接删掉** —— 真机上踩过，而且是静默的。
+显式给了 `--project` / `--container` 就听你的，`default` 保持经典名字（单部署的机器
+从 0.2.x 升上来什么都不用改）。
+
+同一台机上，目录 / compose 项目名 / 容器名 / 端口**任意一个撞了都会被拒绝**，因为
+每一样撞了都是事故：
+
+```
+$ sleight deployments add hk-01 third --dir /srv/cbm-second --port 9002
+DeployError: hk-01 上的部署 'second' 已经用着目录 '/srv/cbm-second' ——
+两个 Manager 共用一个数据目录会互相踩 profile 数据库。换一个再来。
+```
+
+只给主机名而它有多个部署时，**报错并列出来，不猜**：
+
+```
+$ sleight status --host hk-01
+DeployError: host 'hk-01' has 2 deployments, say which one: hk-01/default, hk-01/second
+```
+
+### 流水
+
+```bash
+sleight history                       # 最近 30 条
+sleight history --only-host hk-01 -n 100
+```
+
+```
+时间                         目标             动作      结果  说明
+2026-08-06T02:29:21+00:00  kaliA/default  ext-apply  成功  1/1 个 profile 有改动
+2026-08-06T02:28:59+00:00  kaliA/second   deploy     成功  有变更
+```
 
 ### 关于 SSH 认证
 
@@ -121,7 +170,10 @@ port = 9000
 （不给的话尊重你自己的 ssh 配置，sleight 不替你做主）。
 
 一次部署要发几十条命令，所以非 Windows 上会自动开 `ControlMaster` 复用连接 ——
-只认证一次。
+只认证一次，而且**跨命令**也能复用（复用目录是每用户固定的一个）。
+
+隧道**刻意不复用**：走复用的话 `ssh -N -L` 只是个 slave，请求交给 master 之后立刻
+退出，"进程活着"就不再等价于"隧道还在"，而且转发拆不掉。这个真机上炸过。
 
 ### 关于 sudo
 
@@ -131,7 +183,9 @@ docker 组里）。而且用的是 `sudo -n`（非交互）：目标机没配免
 
 不想配 sudo 就把部署目录放在自己有权限的地方：`--dir ~/cloakbrowser-manager`。
 
----
+> 命令行里的 `~` 是**你的 shell** 展开的。在 Web 界面里手打就没人替你展开了 ——
+> 那里要写全路径（`/home/你的用户名/cloakbrowser-manager`）。展开 `~` 得先连上目标机
+> 问它那个用户的 home 在哪，而校验发生在连接之前。
 
 ## 4. 部署
 
@@ -152,6 +206,11 @@ sleight deploy [--host NAME | --ssh USER@HOST] [参数…]
 | `--no-pull` / `--no-wait` | 不拉镜像 / 不等 healthy |
 | `--force` | 体检有 FAIL 也继续（不推荐） |
 
+**拉镜像是尽力而为，不是必须成功。** 目标机上已经有这个镜像时，拉失败（连不上
+registry）只会打一行提示然后接着用本地那份 —— 内网、离线、daemon 没配代理都很常见，
+而镜像可能是 `docker save | ssh … docker load` 送过去的。本地**没有**这个镜像时才是
+真的走不下去，那时会告诉你怎么把镜像弄过去。
+
 `deploy` 是**幂等**的：配置没变、容器在跑，它连 `up -d` 都不发，更不会换 token 或
 动 `data/`。所以可以放心反复跑，也可以拿它当"确保是这个状态"用。
 
@@ -163,9 +222,18 @@ sleight deploy [--host NAME | --ssh USER@HOST] [参数…]
 sleight preflight --host hk-01
 ```
 
-查的东西：能不能连上、docker 与 compose v2、端口占用（被自己的容器占着算重新部署，
-不算冲突）、部署目录权限、内存、磁盘、镜像、以及**有没有别的容器已经挂了同一个
-`/data`**（两个 Manager 共用一个数据目录会互相踩 profile 数据库）。
+查的东西：能不能连上、docker 与 compose v2、**docker context 指向哪台机**、端口占用
+（被自己的容器占着算重新部署，不算冲突）、部署目录权限、内存、磁盘、镜像、registry
+可达性、以及**有没有别的容器已经挂了同一个 `/data`**。
+
+其中两项值得单说：
+
+- **docker context**：`docker` 命令跟随当前 context。设过远程 context 的话，"本机部署"
+  会**悄悄发到别的机器上**，而体检的其余每一项量的都是本机 —— 你会对着一台机器排查
+  另一台的问题。
+- **registry 可达性**：你的 shell 有代理而 docker daemon 没有的话会指出来。daemon 是
+  systemd 服务，不继承你的环境，症状是 `docker pull` 卡满超时后一句
+  `context deadline exceeded`，很容易被当成网络抖动。
 
 ### 部署之后
 
@@ -278,6 +346,59 @@ sleight ext drift --host hk-01        # 磁盘上装了什么 vs 每个 profile 
 
 ---
 
+## 6.5 模板与实例
+
+### 看有哪些模板
+
+```bash
+sleight templates
+```
+
+把两类模板和**每个选项的解释**都打出来 —— 界面上那些小字和这里是同一份定义
+（`sleight/deploy/presets.py`），不会一边改了另一边忘了。
+
+### 部署模板
+
+建环境时 `--template` 打底，命令行参数再覆盖它：
+
+| key | 适用 | 给什么 |
+|---|---|---|
+| `trial` | 1～2 个实例，跑通流程 | shm 2gb，只听本机 |
+| `standard` | 约 3 个实例，**大多数情况选它** | shm 5gb，只听本机 |
+| `large` | 约 5 个实例 | shm 8gb，建议 16 GB 内存 |
+| `private-net` | 任务节点在同一内网，不想走隧道 | 监听 0.0.0.0（自带 `expose`） |
+
+```bash
+sleight hosts add hk-01 --ssh deploy@1.2.3.4 --template standard --dir /srv/cbm
+sleight deployments add hk-01 second --template large --dir /srv/cbm-2 --port 9001
+```
+
+数字取自手册 A.7 / A.11 的实测与压测建议。到 10 个实例左右就该拆成两个 Manager
+或两台机器了 —— 独立端口、独立 `data/`，缩小故障域。
+
+### 建实例
+
+```bash
+sleight profiles create news-hk-01 --host hk-01 --preset windows_hk --tags hk,news \
+  --proxy socks5://user:pass@host:1080
+```
+
+**幂等**：同名的会被更新而不是再建一个。建好**不会自动启动** —— 要用时
+`lease()` 里的 `ensure_ready()` 会拉起它，建的时候不该顺手占一份内存。
+
+四个身份模板：
+
+| key | 平台 · 时区 · 语言 |
+|---|---|
+| `windows_us` | windows · America/New_York · en-US（NVIDIA D3D11） |
+| `windows_hk` | windows · Asia/Hong_Kong · zh-HK（Intel D3D11） |
+| `macos_us` | macos · America/Los_Angeles · en-US（Apple Metal） |
+| `linux_us` | linux · America/New_York · en-US（Mesa llvmpipe） |
+
+**预设的价值是保证指纹自洽** —— 平台、时区、语言、GPU 串必须是同一台机器上可能
+出现的组合。声称是 Windows 却报一串 Apple Metal 的 renderer，是一眼就会被标记的矛盾。
+自相矛盾的组合（比如 `--geoip` 却没配代理）会在下发前被拒绝。
+
 ## 7. Web 界面
 
 ```bash
@@ -285,21 +406,67 @@ pip install "sleight[ui]"
 sleight ui
 ```
 
-打开 <http://127.0.0.1:8700>。界面能做：加主机、体检 + 预览、部署（进度实时流式打出来）、
-看状态和日志、备份、profile 启停、插件推送/下发/验证/漂移。
+打开 <http://127.0.0.1:8700>。界面和 CLI **共用同一个 SQLite 库**，两边看到的是同一份。
 
-拉镜像要几分钟，所以长动作走后台 job + SSE，不是一个转圈等超时的 POST。
+### 第一次用：三步引导
+
+没有目标机时它直接给一条路径，而不是一堆按钮：
+
+```
+① 连接目标机  →  ② 选择规模  →  ③ 体检并创建
+```
+
+第一步填完可以**先「测试连接」**：当场告诉你连不连得上、docker 在不在、内存多少、
+当前用户是谁。连不通就不放行下一步 —— 而不是保存了、部署了、等超时了才发现 key 不对。
+
+第二步是四张模板卡片，每张写清适用场景和资源要求。第三步先体检再部署，
+**部署前会把真正要写到目标机上的 compose 和 `.env` 全文列出来**。
+
+### 每个选项都有解释和推荐值
+
+输入框下面那行小字说的是"填错会怎样"，不是重复字段名。比如 `/dev/shm`：
+
+> Chromium 用共享内存放渲染缓冲，不够会莫名崩标签页。这是**整个容器共享**的，
+> 不是每个实例一份。
+> *推荐 3 个 profile 用 5gb；再多按压测调*
+
+这些由后端定义（`presets.FIELD_HELP`），`sleight templates` 打出来的是同一份。
+
+### 分区
+
+| 分区 | 干什么 |
+|---|---|
+| 概览 | 状态、容器日志、**显示完整 token**、操作流水；备份 / 升级 / 回滚 |
+| 部署 | 改参数、体检 + 预览（含将写入的文件全文）、部署 |
+| 实例 | 按身份模板新建、列表（展开看完整配置含 `launch_args`）、启停、删除 |
+| 插件 | 推送、下发、验证、查漂移 |
+| 危险区 | 三种「删」分开讲清楚 |
+
+左边列的是**部署**（`主机/部署名`）而不是主机 —— 一台机可以跑好几个 Manager。
+
+右上角切换浅色 / 深色 / 跟随系统。
+
+### 三种「删」的区别
+
+界面把它们放在同一个"危险区"里并逐条说明，因为混淆的代价很不一样：
+
+| | 目标机上的容器 | 目标机上的 `data/` | 本地记录 |
+|---|---|---|---|
+| 停并删容器 | **删** | 保留 | 保留 |
+| 连 `data/` 一起删 | **删** | **删（不可逆）** | 保留 |
+| 只删本地记录 | 保留 | 保留 | **删** |
+
+删 `data/` 要把 `主机/部署名` 原样打一遍才执行。容器还在跑时点「只删记录」会先警告
+——那会让远端变成没人管的孤儿。删实例同理，要把实例名打一遍（它连登录态一起删）。
 
 > ⚠️ **这个界面能在你的目标机上执行 ssh 和 docker 命令**，等于一个远程执行入口。
-> 所以它默认只监听 `127.0.0.1`；要绑到别的地址**必须**同时给口令，否则拒绝启动：
+> 所以默认只监听 `127.0.0.1`；绑别的地址**必须**同时给口令，否则拒绝启动：
 >
 > ```bash
 > sleight ui --bind 0.0.0.0 --port 8700 --token "$(openssl rand -hex 16)"
 > ```
 
 界面本身不存任何 Manager token，要用时现从目标机的 `.env` 读。
-
----
 
 ## 8. 内建的护栏
 
@@ -321,6 +488,10 @@ sleight ui
 | 建目录后只 `chown` 顶层，**不递归** | `data/` 里是容器写的浏览器用户数据 |
 | 备份/删 `data/` 借一次性 root 容器，不要求 sudo | 那些文件归 root，普通用户读不了也删不掉 |
 | 打包失败绝不留下 `.tar.gz` | 一个只有十几条的残档看着和真备份一样 |
+| 同机第二个 Manager 自动换 compose 项目名和容器名 | 不换的话第二个会把第一个的容器删掉 |
+| 同机的目录/项目名/容器名/端口撞了一律拒绝 | 每一样撞了都是事故，而且都是静默的 |
+| 只给主机名而它有多个部署 → 报错列出，不猜 | 猜错就是往错的 Manager 上执行 |
+| 镜像已在目标机上时，拉取失败不阻断部署 | 内网/离线目标机很常见，镜像可能是 load 进去的 |
 | compose 里是 `${AUTH_TOKEN:?…}` | `.env` 丢了要当场报错，而不是拉起一个免鉴权的 Manager |
 
 ---
@@ -330,11 +501,13 @@ sleight ui
 CLI 能做的，Python 里都能做 —— 想接进自己的运维脚本时用这个。
 
 ```python
-from sleight.deploy import DeploySpec, Deployer, SSHRunner
+from sleight.deploy import Deployer, Store
 from sleight.deploy.ops import ExtensionOps
 
-spec = DeploySpec(dir="/srv/cloakbrowser-manager", port=9000)
-runner = SSHRunner("deploy@1.2.3.4", identity="~/.ssh/id_ed25519")
+store = Store()                          # ~/.sleight/sleight.db
+entry = store.resolve("hk-01/default")   # 或者只给 "hk-01"（唯一部署时）
+runner = store.require_host(entry.host).runner()
+spec = entry.spec
 
 with runner:
     dep = Deployer(spec, runner, sudo=True, on_progress=print)
@@ -358,6 +531,14 @@ with runner:
 `lease()` / `ensure_profile()` 那一套照常用。
 
 `on_progress` 是每完成一步的回调 —— CLI 用它打进度，Web 界面用它推 SSE。
+
+不想用库里的记录、就地指一台机也行：
+
+```python
+from sleight.deploy import DeploySpec, SSHRunner
+
+Deployer(DeploySpec(dir="/srv/cbm"), SSHRunner("deploy@1.2.3.4")).apply()
+```
 
 ---
 

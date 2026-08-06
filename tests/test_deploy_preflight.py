@@ -99,6 +99,7 @@ def test_all_green_on_a_healthy_machine():
         "disk": CheckLevel.OK,
         "image": CheckLevel.OK,
         "registry": CheckLevel.OK,
+        "context": CheckLevel.OK,
     }
 
 
@@ -261,3 +262,31 @@ def test_registry_is_not_checked_when_the_image_is_already_local():
         PROXY_SHELL: (0, "http://192.168.1.1:7890"),
     })
     assert "registry" not in checks
+
+
+# --------------------------------------------------------------------------- #
+# docker context
+# --------------------------------------------------------------------------- #
+
+
+def test_the_default_context_is_quiet():
+    checks = _run(replies={"docker context show": (0, "default")})
+    assert checks["context"][0] is CheckLevel.OK
+
+
+def test_a_remote_context_is_flagged():
+    """docker 跟随 context —— 设过远程 context 的话，"本机部署"会悄悄发到别的机器上，
+    而体检的其余每一项量的都是 runner 所在的这台。"""
+    checks = _run(replies={
+        "docker context show": (0, "hostB"),
+        "docker context inspect": (0, "ssh://kaliB"),
+    })
+    level, text = checks["context"]
+    assert level is CheckLevel.WARN
+    assert "hostB" in text and "ssh://kaliB" in text
+    assert "docker context use default" in text
+
+
+def test_an_old_docker_without_context_support_is_not_a_problem():
+    checks = _run(replies={"docker context show": (127, "")})
+    assert checks["context"][0] is CheckLevel.OK

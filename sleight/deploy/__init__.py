@@ -10,15 +10,17 @@
     >>> from sleight.deploy import DeploySpec, Deployer, LocalRunner
     >>> spec = DeploySpec(dir="/srv/cloakbrowser-manager")
     >>> Deployer(spec, LocalRunner()).apply()          # doctest: +SKIP
+
+主机和"这台机上有哪几个 Manager"存在本地 SQLite 里（:class:`Store`）。
 """
 
 from __future__ import annotations
 
 from .engine import Deployer, DeployError, DeployResult, Plan
-from .inventory import Host, Inventory
 from .preflight import Check, CheckLevel, preflight
 from .runner import CommandResult, LocalRunner, Runner, SSHRunner
 from .spec import DEFAULT_IMAGE, DeploySpec
+from .store import Deployment, Host, Store
 
 __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "DeploySpec",
@@ -34,6 +36,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "preflight",
     "Check",
     "CheckLevel",
-    "Inventory",
+    "Store",
     "Host",
+    "Deployment",
 ]
