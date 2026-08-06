@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
@@ -23,6 +25,12 @@ from .deploy.engine import Deployer
 from .deploy.errors import DeployError, PreflightFailed
 from .deploy.ops import ExtensionOps, ProfileOps
 from .deploy.preflight import CheckLevel, worst
+from .deploy.presets import (
+    DEPLOY_TEMPLATES,
+    FIELD_HELP,
+    PROFILE_PRESETS,
+    profile_spec_from,
+)
 from .deploy.runner import Runner, describe
 from .deploy.spec import DEFAULT_IMAGE, DeploySpec
 from .deploy.store import Deployment, Host, Store
@@ -34,6 +42,7 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_PREFLIGHT = 3
 EXIT_INTERRUPT = 130
+EXIT_SIGPIPE = 141        # 128 + SIGPIPE，管道被下游关掉时的惯例
 
 
 # --------------------------------------------------------------------------- #
@@ -107,6 +116,19 @@ _SPEC_FLAGS = {
 
 def _store() -> Store:
     return Store()
+
+
+def _template_spec(args: argparse.Namespace) -> DeploySpec:
+    """模板打底 + 命令行覆盖。模板和界面上那几张卡片是同一份定义。"""
+    name = getattr(args, "template", None)
+    base: dict[str, Any] = {}
+    if name:
+        chosen = next((t for t in DEPLOY_TEMPLATES if t.key == name), None)
+        if chosen is None:
+            known = ", ".join(t.key for t in DEPLOY_TEMPLATES)
+            raise DeployError(f"没有叫 {name!r} 的模板。有这些：{known}")
+        base = dict(chosen.overrides)
+    return DeploySpec(**{**base, **_spec_overrides(args)})
 
 
 def _spec_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -432,7 +454,7 @@ def cmd_hosts_add(args: argparse.Namespace) -> int:
         strict_host_key="accept-new" if args.accept_new else "",
         notes=args.notes or "",
     ))
-    spec = DeploySpec(**_spec_overrides(args))
+    spec = _template_spec(args)
     store.put_deployment(args.name, "default", spec)
     _out(f"已写入 {store.path}")
     _out(f"  主机 {args.name}  →  {args.ssh or '本机'}")
@@ -482,7 +504,7 @@ def cmd_deployments_ls(args: argparse.Namespace) -> int:
 
 def cmd_deployments_add(args: argparse.Namespace) -> int:
     store = _store()
-    spec = DeploySpec(**_spec_overrides(args))
+    spec = _template_spec(args)
     store.put_deployment(args.host_name, args.name, spec)
     _out(f"已记下 {args.host_name}/{args.name}  →  {spec.dir}  端口 {spec.port}")
     _out(f"试一下：sleight preflight --host {args.host_name}/{args.name}")
@@ -676,6 +698,51 @@ def cmd_profiles_ls(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_templates(args: argparse.Namespace) -> int:
+    """把模板和字段解释打出来 —— 和界面上看到的是同一份定义。"""
+    if args.json:
+        _dump({
+            "deploy_templates": [t.to_dict() for t in DEPLOY_TEMPLATES],
+            "profile_presets": [p.to_dict() for p in PROFILE_PRESETS],
+            "help": {k: v.to_dict() for k, v in FIELD_HELP.items()},
+        })
+        return EXIT_OK
+    _out("部署模板（hosts add / deployments add 的 --template）")
+    for t in DEPLOY_TEMPLATES:
+        _out(f"\n  {t.key:12} {t.label} —— {t.summary}")
+        _out(f"               {t.detail}")
+    _out("\n\n实例身份模板（profiles create 的 --preset）")
+    _out("  预设的价值是**保证指纹自洽**：平台、时区、语言、GPU 串必须是同一台机器上")
+    _out("  可能出现的组合。")
+    for p in PROFILE_PRESETS:
+        d = p.to_dict()
+        _out(f"\n  {d['key']:12} {d['label']} —— {d['summary']}")
+        _out(f"               {d['platform']} · {d['timezone']} · {d['locale']}")
+    return EXIT_OK
+
+
+def cmd_profiles_create(args: argparse.Namespace) -> int:
+    """按身份模板建一个实例。**幂等**：同名的会被更新而不是再建一个。"""
+    dep = _deployer(args)
+    width, _, height = (args.screen or "1920x1080").partition("x")
+    spec = profile_spec_from(
+        args.preset, args.name,
+        proxy=args.proxy, geoip=args.geoip, headless=args.headless,
+        notes=args.notes, tags=tuple(t.strip() for t in (args.tags or "").split(",") if t.strip()),
+        screen_width=int(width or 1920), screen_height=int(height or 1080),
+        fingerprint_seed=args.seed,
+    )
+    with dep.connect() as mgr:
+        info = mgr.ensure_profile(spec)
+    _record(dep, "profile-create", ok=True, detail=f"{info.name}（{args.preset}）")
+    if args.json:
+        _dump({"id": info.id, "name": info.name, "tags": sorted(info.tags)})
+    else:
+        _out(f"实例 {info.name} 就绪（{info.id}）")
+        _out("建好不会自动启动 —— 下次 lease() 时 ensure_ready() 会拉起它。")
+    return EXIT_OK
+
+
 def cmd_profiles_launch(args: argparse.Namespace) -> int:
     ProfileOps(_deployer(args), on_progress=_out).launch(args.profile)
     return EXIT_OK
@@ -738,6 +805,9 @@ def _spec_parser() -> argparse.ArgumentParser:
     g.add_argument("--container", metavar="NAME", help="容器名（默认 cloakbrowser-manager）")
     g.add_argument("--allow-latest", action="store_true", default=None,
                    help="允许用 latest 这种不可追溯的标签")
+    g.add_argument("--template", metavar="KEY",
+                   choices=[t.key for t in DEPLOY_TEMPLATES],
+                   help="按模板打底（sleight templates 看有哪些），命令行参数再覆盖它")
     return p
 
 
@@ -769,6 +839,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-wait", action="store_true", help="不等 healthy")
     p.add_argument("--force", action="store_true", help="体检有 FAIL 也继续（不推荐）")
     p.set_defaults(func=cmd_deploy)
+
+    p = add("templates", "看部署模板、实例身份模板，和每个选项的解释")
+    p.set_defaults(func=cmd_templates)
 
     p = add("preflight", "只体检，不部署", target, spec)
     p.set_defaults(func=cmd_preflight)
@@ -879,13 +952,27 @@ def build_parser() -> argparse.ArgumentParser:
     psub = p.add_subparsers(dest="profiles_command", metavar="<子命令>")
     pp = psub.add_parser("ls", help="列出全部 profile", parents=[target])
     pp.set_defaults(func=cmd_profiles_ls)
+    pp = psub.add_parser("create", help="按身份模板建一个实例", parents=[target])
+    pp.add_argument("name", help="实例名，Manager 里唯一")
+    pp.add_argument("--preset", default="windows_us",
+                    choices=[x.key for x in PROFILE_PRESETS],
+                    help="身份模板：决定平台/时区/语言/GPU 串，必须自洽（默认 windows_us）")
+    pp.add_argument("--proxy", metavar="URL", help="socks5://user:pass@host:port")
+    pp.add_argument("--tags", metavar="A,B", help="逗号分隔，Pool 靠它路由")
+    pp.add_argument("--screen", default="1920x1080", metavar="WxH")
+    pp.add_argument("--geoip", action="store_true", help="由代理出口 IP 推导时区和语言")
+    pp.add_argument("--headless", action="store_true", help="无头（反检测场景通常别开）")
+    pp.add_argument("--seed", type=int, metavar="N", help="固定指纹种子，指纹才可复现")
+    pp.add_argument("--notes", metavar="TEXT")
+    pp.set_defaults(func=cmd_profiles_create)
+
     pp = psub.add_parser("launch", help="拉起一个（id 或名字）", parents=[target])
     pp.add_argument("profile")
     pp.set_defaults(func=cmd_profiles_launch)
     pp = psub.add_parser("stop", help="停一个；不给参数则停全部", parents=[target])
     pp.add_argument("profile", nargs="?")
     pp.set_defaults(func=cmd_profiles_stop)
-    p.set_defaults(func=lambda a: (_err("用 sleight profiles ls|launch|stop"), EXIT_USAGE)[1])
+    p.set_defaults(func=lambda a: (_err("用 sleight profiles ls|create|launch|stop"), EXIT_USAGE)[1])
 
     # —— 界面 ——
     p = add("ui", "启动 Web 界面（需要 pip install \"sleight[ui]\"）")
@@ -906,7 +993,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """入口。
 
     :param argv: 参数列表，``None`` 表示用 ``sys.argv[1:]``
-    :returns: 退出码 —— 0 成功、1 失败、2 用法错、3 体检没过、130 被 Ctrl-C 打断
+    :returns: 退出码 —— 0 成功、1 失败、2 用法错、3 体检没过、130 Ctrl-C、
+        141 输出管道被下游关掉（``| head`` 之类）
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -927,6 +1015,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (DeployError, SleightError, ValueError) as exc:
         _err(f"{type(exc).__name__}: {exc}")
         return EXIT_ERROR
+    except BrokenPipeError:
+        # 下游（head / less）把管道关了。这不是错误，但如果不处理，解释器退出时还会
+        # 往已关闭的 fd 上刷一次缓冲，再打一段 "Exception ignored" 的噪音。
+        # 把 stdout 换成 devnull 就干净了 —— 但它只是消噪，stdout 不是真文件描述符
+        # 时（被捕获、被嵌入）拿不到 fileno，那不该反过来把断管变成崩溃。
+        with suppress(Exception):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return EXIT_SIGPIPE
     except KeyboardInterrupt:
         _err("\n已中断")
         return EXIT_INTERRUPT

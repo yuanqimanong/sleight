@@ -379,3 +379,124 @@ def test_deleting_a_deployment_leaves_the_target_alone(client):
     assert client.delete("/api/deployments/h/second").status_code == 200
     assert [d["name"] for d in client.get("/api/deployments?host=h").json()] == ["default"]
     assert StubDeployer.instances == [], "删记录不该碰目标机"
+
+
+# --------------------------------------------------------------------------- #
+# 前端：结构性检查
+#
+# 渲染时抛一次异常 = 整页白屏，而且控制台里未必看得到。这几条不跑浏览器，
+# 但能挡住导致白屏的那类写法。
+# --------------------------------------------------------------------------- #
+
+
+def _index() -> str:
+    return app_mod.INDEX.read_text(encoding="utf-8")
+
+
+def _strip_comments(source: str) -> str:
+    """把注释换成等长空白。
+
+    行号要保持不变，否则报出来的位置对不上；而注释里的示例代码不该被当成代码扫。
+    """
+    import re
+
+    return re.sub(
+        r"/\*.*?\*/|//[^\n]*",
+        lambda m: re.sub(r"[^\n]", " ", m.group(0)),
+        source,
+        flags=re.S,
+    )
+
+
+def _when_calls(source: str):
+    """扫出每一处 ``when(…)``，产出 ``(行号, 条件, 子节点文本)``。
+
+    括号配对地取实参，而不是拿定长正则去猜 —— 猜出来的行号会指到别处，
+    修的人会先怀疑测试而不是代码。
+    """
+    import re
+
+    source = _strip_comments(source)
+    for match in re.finditer(r"\bwhen\(", source):
+        i, depth, args, current = match.end(), 1, [], []
+        while i < len(source) and depth:
+            ch = source[i]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            if ch == "," and depth == 1:
+                args.append("".join(current))
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+        args.append("".join(current))
+        yield source[: match.start()].count("\n") + 1, args[0].strip(), ",".join(args[1:])
+
+
+def test_conditional_children_that_dereference_the_condition_must_be_lazy():
+    """``when(x, h(...x.foo...))`` 会白屏。
+
+    JS 先算完实参再调用，所以 x 为 null 时那个 h(...) 当场抛异常，整棵树渲染失败 ——
+    而且控制台里未必看得到。条件是"这东西存在吗"的时候必须传函数：
+    ``when(x, () => h(...x.foo...))``。
+
+    这条正是"点开『添加目标机』是白屏"的成因。
+    """
+    import re
+
+    offenders = []
+    for line, cond, kids in _when_calls(_index()):
+        if not re.fullmatch(r"[\w.]+", cond):       # 带 && / ! 的条件已经自带保护
+            continue
+        if kids.lstrip().startswith("() =>"):        # 已经是惰性的
+            continue
+        if re.search(rf"{re.escape(cond)}\.\w", kids):
+            offenders.append((line, cond))
+    assert not offenders, f"这些 when() 的子节点必须改成 () => …：{offenders}"
+
+
+def test_the_lazy_check_actually_catches_the_bug_it_is_for():
+    """守卫本身得有效 —— 一条永远绿的规则等于没有。"""
+    import re
+
+    bad = 'when(w.probe, h("div", null, w.probe.steps.length))'
+    hits = [
+        line for line, cond, kids in _when_calls(bad)
+        if re.fullmatch(r"[\w.]+", cond) and not kids.lstrip().startswith("() =>")
+        and re.search(rf"{re.escape(cond)}\.\w", kids)
+    ]
+    assert hits, "这条规则连它要抓的原始 bug 都抓不到"
+
+
+def test_every_view_is_reachable_from_the_tab_list():
+    """标签页和视图函数必须一一对应，否则点过去就是 undefined is not a function。"""
+    import re
+
+    source = _index()
+    tabs = set(re.findall(r'\["(\w+)", "[^"]+"\]', source.split("const TABS")[1].split(";")[0]))
+    views = set(re.findall(r"(\w+): (\w+View)", source.split("const views = {")[1].split("};")[0]))
+    assert tabs == {k for k, _ in views}, f"标签 {tabs} 与视图 {views} 对不上"
+
+
+def test_the_ui_never_hardcodes_field_help():
+    """字段解释只在后端定义一份（presets.FIELD_HELP），前端渲染它。
+
+    比对整段而不是前缀：placeholder 和解释共用一小段示例值是正常的，
+    整句一模一样才是抄过去了 —— 那样改一处必然漏另一处。
+    """
+    from sleight.deploy.presets import FIELD_HELP
+
+    source = _index()
+    pasted = [key for key, meta in FIELD_HELP.items() if meta.why and meta.why in source]
+    assert not pasted, f"这些字段的解释被抄进前端了：{pasted}"
+
+
+def test_the_ui_ships_a_theme_toggle():
+    source = _index()
+    assert 'data-theme="dark"' in source
+    assert "prefers-color-scheme: dark" in source
+    assert "sleight_theme" in source

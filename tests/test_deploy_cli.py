@@ -370,3 +370,108 @@ def test_table_aligns():
 def test_confirm_refuses_when_not_a_tty(capsys):
     assert not cli._confirm("delete?", "x", assume_yes=False)
     assert cli._confirm("delete?", "x", assume_yes=True)
+
+
+# --------------------------------------------------------------------------- #
+# 模板与建实例 —— 命令行和界面必须是同一套定义
+# --------------------------------------------------------------------------- #
+
+
+def test_templates_lists_both_kinds(capsys):
+    assert cli.main(["templates"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "standard" in out and "private-net" in out
+    assert "windows_us" in out and "America/New_York" in out
+    assert "shm 5gb" in out                       # 说清每档到底是什么，而不是只有名字
+
+
+def test_templates_json_carries_the_field_help(capsys):
+    cli.main(["--json", "templates"])
+    payload = json.loads(capsys.readouterr().out)
+    assert {t["key"] for t in payload["deploy_templates"]} >= {"trial", "standard", "large"}
+    assert payload["help"]["shm_size"]["recommend"]
+
+
+def test_a_template_seeds_the_spec_and_flags_still_win(capsys):
+    cli.main(["hosts", "add", "h", "--template", "large", "--dir", "/srv/a"])
+    assert Store().resolve("h").spec.shm_size == "8gb"
+
+    cli.main(["deployments", "add", "h", "second", "--template", "large",
+              "--dir", "/srv/b", "--port", "9001", "--shm-size", "2gb"])
+    assert Store().resolve("h/second").spec.shm_size == "2gb", "命令行显式给的必须压过模板"
+
+
+def test_the_private_net_template_carries_its_own_expose_flag():
+    """它把 bind_ip 设成 0.0.0.0，没有 expose=True 的话连存都存不进去。"""
+    cli.main(["hosts", "add", "h", "--template", "private-net", "--dir", "/srv/a"])
+    spec = Store().resolve("h").spec
+    assert spec.bind_ip == "0.0.0.0" and spec.expose is True
+
+
+def test_an_unknown_template_lists_the_real_ones(capsys):
+    """argparse 的 choices 直接拦掉并把合法值列出来 —— 比运行到一半再报错好。"""
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["hosts", "add", "h", "--template", "nope", "--dir", "/srv/a"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "standard" in err and "private-net" in err
+
+
+def test_profiles_create_uses_the_preset(capsys, target, monkeypatch):
+    """身份模板保证平台/时区/语言/GPU 自洽 —— 建实例时就该定下来。"""
+    from contextlib import contextmanager
+
+    seen = {}
+
+    class FakeManager:
+        name = "fake"
+
+        def ensure_profile(self, spec):
+            seen["spec"] = spec
+            from sleight.core.types import InstanceInfo
+            return InstanceInfo(id="p1", provider="fake", ready=False,
+                                name=spec.name, tags=frozenset(spec.tags))
+
+    @contextmanager
+    def connect(**_kw):
+        yield FakeManager()
+
+    monkeypatch.setattr(cli.Deployer, "connect", lambda self, **kw: connect())
+    cli.main(["hosts", "add", "h", "--dir", "/srv/cbm"])
+    capsys.readouterr()
+
+    assert cli.main([
+        "profiles", "create", "news-hk-01", "--host", "h", "--preset", "windows_hk",
+        "--tags", "hk,news", "--screen", "1366x768",
+    ]) == cli.EXIT_OK
+
+    spec = seen["spec"]
+    assert spec.platform == "windows" and spec.timezone == "Asia/Hong_Kong"
+    assert spec.locale == "zh-HK"
+    assert "Intel" in spec.gpu_renderer          # 和 platform 自洽
+    assert spec.tags == ("hk", "news")
+    assert (spec.screen_width, spec.screen_height) == (1366, 768)
+    assert spec.auto_launch is False, "建实例不该顺手拉起一个浏览器占内存"
+    assert "news-hk-01" in capsys.readouterr().out
+
+
+def test_profiles_create_refuses_a_contradictory_combination(capsys, target):
+    """geoip 要靠代理出口 IP 推导，没代理就什么都推不出来。"""
+    cli.main(["hosts", "add", "h", "--dir", "/srv/cbm"])
+    capsys.readouterr()
+    assert cli.main(["profiles", "create", "x", "--host", "h", "--geoip"]) == cli.EXIT_ERROR
+    assert "geoip" in capsys.readouterr().err
+
+
+def test_a_closed_output_pipe_is_not_a_traceback(capsys, monkeypatch):
+    """`sleight templates | head -3` 不该吐一段 BrokenPipeError。
+
+    下游关管道是正常的。不处理的话解释器退出时还会往已关闭的 fd 上刷缓冲，
+    再打一段 "Exception ignored" 的噪音。
+    """
+    def explode(*_a, **_kw):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(cli, "_dump", explode)
+    assert cli.main(["--json", "templates"]) == cli.EXIT_SIGPIPE

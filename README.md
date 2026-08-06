@@ -94,6 +94,11 @@ sleight ui                                                # the same, in a brows
 Hosts, the managers on each of them, and a deploy/backup/upgrade audit trail live in a
 local SQLite database (`~/.sleight/sleight.db`) that the CLI and the web UI share.
 
+`sleight ui` walks you through it: connect a host (with a real connection test before
+anything is saved), pick a sizing template, preflight, deploy. Every option carries a
+one-line explanation of what breaks if you get it wrong plus a recommended value —
+defined once on the backend, rendered by both the CLI (`sleight templates`) and the UI.
+
 Deploys are idempotent, `--dry-run` prints the exact bytes it would write, and the
 things you must not do are refused rather than documented: no `latest` tag, no
 `down -v`, no silently rotating an in-use `AUTH_TOKEN`, no second manager on the same

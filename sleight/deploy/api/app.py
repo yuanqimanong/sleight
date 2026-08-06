@@ -28,6 +28,7 @@ from ...core.errors import SleightError
 from ..engine import Deployer
 from ..errors import DeployError
 from ..ops import ExtensionOps, ProfileOps, extension_paths
+from ..presets import DEPLOY_TEMPLATES, FIELD_HELP, PROFILE_PRESETS, profile_spec_from
 from ..spec import DEFAULT_IMAGE, DeploySpec
 from ..store import Deployment, Host, Store
 
@@ -246,11 +247,59 @@ def create_app(*, token: str | None = None) -> Any:
             "default_image": DEFAULT_IMAGE,
             "spec": asdict(DeploySpec()),
             "auth": bool(token),
+            # 模板和字段解释只在后端定义一份，前端渲染它
+            "deploy_templates": [t.to_dict() for t in DEPLOY_TEMPLATES],
+            "profile_presets": [p.to_dict() for p in PROFILE_PRESETS],
+            "help": {k: v.to_dict() for k, v in FIELD_HELP.items()},
         }
 
     # ---------------------------------------------------------------- #
     # 主机
     # ---------------------------------------------------------------- #
+
+    @app.post("/api/probe")
+    def probe_host(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """**保存之前**先测一下这台机连不连得上、有没有 docker。
+
+        引导流程要的就是这个：填完连接信息立刻能验证，而不是保存了、部署了、
+        等超时了才发现 key 不对。所以它不碰库，也不需要先有主机记录。
+        """
+        host = Host(
+            name="probe",
+            ssh=str(body.get("ssh") or ""),
+            port=int(body["port"]) if body.get("port") else None,
+            identity=str(body.get("identity") or ""),
+            strict_host_key="accept-new" if body.get("accept_new") else "",
+        )
+        runner = host.runner()
+        steps: list[dict[str, Any]] = []
+
+        def step(name: str, argv: list[str], parse=lambda r: r.text) -> bool:
+            result = runner.run(argv, timeout=25)
+            steps.append({
+                "name": name, "ok": result.ok,
+                "detail": parse(result) if result.ok
+                else (result.err.strip() or result.out.strip() or f"exit {result.code}"),
+            })
+            return result.ok
+
+        try:
+            if not step("连接", ["uname", "-sm"]):
+                return {"ok": False, "steps": steps,
+                        "hint": "连不上。检查地址、端口和私钥；BatchMode 是开着的，"
+                                "所以不会弹密码框而是直接失败。"}
+            if not step("docker", ["docker", "version", "--format", "{{.Server.Version}}"]):
+                return {"ok": False, "steps": steps,
+                        "hint": "目标机上没有可用的 docker。装好并把当前用户加进 docker 组"
+                                "（usermod -aG docker $USER，然后重新登录）。"}
+            step("compose", ["docker", "compose", "version", "--short"])
+            step("内存", ["sh", "-c", "free -g | awk 'NR==2{print $2\" GB\"}'"])
+            step("当前用户", ["id", "-un"])
+        except (DeployError, SleightError) as exc:
+            return {"ok": False, "steps": steps, "hint": f"{type(exc).__name__}: {exc}"}
+        finally:
+            runner.close()
+        return {"ok": all(s["ok"] for s in steps), "steps": steps, "hint": ""}
 
     @app.get("/api/hosts")
     def list_hosts() -> list[dict[str, Any]]:
@@ -484,6 +533,69 @@ def create_app(*, token: str | None = None) -> Any:
         for p in raw:
             p["extension_paths"] = extension_paths([str(a) for a in (p.get("launch_args") or [])])
         return raw
+
+    @app.post("/api/hosts/{name}/profiles")
+    def create_profile(
+        name: str, deployment: str | None = None, body: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        """按身份模板建一个实例。**幂等**：同名的会被更新而不是再建一个。
+
+        ``auto_launch`` 一律 False —— 建的时候不该顺手拉起一个浏览器占着内存，
+        要用时 ``lease()`` 会自己拉。
+        """
+        profile_name = str(body.get("name") or "").strip()
+        if not profile_name:
+            raise HTTPException(status_code=400, detail="实例得有个名字")
+        overrides: dict[str, Any] = {
+            "proxy": body.get("proxy"),
+            "geoip": bool(body.get("geoip")),
+            "headless": bool(body.get("headless")),
+            "notes": body.get("notes"),
+            "tags": tuple(t.strip() for t in str(body.get("tags") or "").split(",") if t.strip()),
+        }
+        for key in ("screen_width", "screen_height", "fingerprint_seed"):
+            if body.get(key):
+                overrides[key] = int(body[key])
+        spec = wrap(lambda: profile_spec_from(
+            str(body.get("preset") or "windows_us"), profile_name, **overrides
+        ))
+        dep, _ = deployer(_ref(name, deployment))
+
+        def make() -> dict[str, Any]:
+            with dep.connect() as mgr:
+                info = mgr.ensure_profile(spec)
+                return {"id": info.id, "name": info.name, "tags": sorted(info.tags)}
+
+        return wrap(make)
+
+    @app.delete("/api/hosts/{name}/profiles/{pid}")
+    def delete_profile(
+        name: str, pid: str, confirm: str = "", deployment: str | None = None
+    ) -> dict[str, Any]:
+        """删一个实例。**要把它的名字原样打一遍。**
+
+        删 profile 连带删掉 ``user_data_dir`` —— Cookie 和登录态一起没，不可逆。
+        停止实例不会丢这些，删才会。
+        """
+        dep, _ = deployer(_ref(name, deployment))
+
+        def drop() -> dict[str, Any]:
+            with dep.connect() as mgr:
+                raw = next((p for p in mgr.list_profiles() if str(p.get("id")) == pid), None)
+                if raw is None:
+                    raise HTTPException(status_code=404, detail=f"没有 id 为 {pid} 的实例")
+                if confirm != (raw.get("name") or ""):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"要删就把实例名 {raw.get('name')!r} 原样打一遍 —— "
+                            "删 profile 连登录态一起删，回不来"
+                        ),
+                    )
+                mgr.delete_profile(pid, force=True)
+                return {"ok": True, "name": raw.get("name")}
+
+        return wrap(drop)
 
     @app.post("/api/hosts/{name}/profiles/{pid}/{action}")
     def profile_action(
