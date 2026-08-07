@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ipaddress
 import json
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
+from fnmatch import fnmatch
 from random import Random
 from typing import Any
+from urllib.parse import urlsplit
 
 from .element import Element
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
@@ -27,20 +30,81 @@ from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
 from .protocol import Event
-from .resources import DedupeKey, NetworkResource, ResourceTracker
+from .resources import (
+    RESOURCE_TYPES,
+    BlockStats,
+    DedupeKey,
+    NetworkResource,
+    ResourceTracker,
+)
 from .transport import Transport
-from .types import Box, Condition, DomReady, Point
+from .types import Box, ClearReport, Condition, DomReady, Point, StorageType
 
 log = logging.getLogger("sleight.session")
 
-__all__ = ["NetworkResource", "Selectable", "Session"]
+__all__ = [
+    "BlockStats",
+    "ClearReport",
+    "NetworkResource",
+    "Selectable",
+    "Session",
+    "StorageType",
+]
 
 _POLL_MIN = 0.10
 _POLL_MAX = 0.25
 _PUMP_SLICE = 0.05
 
+#: :meth:`Session.exit_ip` 的默认端点。**必须是纯文本响应** —— 拿查询站的首页去
+#: innerText 里挑 IP，第一个未必是出口地址
+EXIT_IP_ENDPOINTS = (
+    "https://api.ipify.org",
+    "https://checkip.amazonaws.com",
+    "https://icanhazip.com",
+)
+
 #: 无字段的 frozen dataclass，共享一个实例即可（也让 ruff B008 满意）
 _DEFAULT_WAIT = DomReady()
+
+#: :meth:`Session.clear_site_data` 的默认清理范围。**只清 cookie 是不够的** ——
+#: 反检测服务的设备标识在 localStorage / indexedDB 里都有副本，会立刻把 cookie 还原
+_DEFAULT_CLEAR_TYPES = (
+    StorageType.COOKIES,
+    StorageType.LOCAL_STORAGE,
+    StorageType.INDEXEDDB,
+    StorageType.CACHE_STORAGE,
+    StorageType.SERVICE_WORKERS,
+)
+
+
+def _normalize_origin(origin: str) -> str:
+    """``https://host/a/b?c`` → ``https://host``。
+
+    CDP 的 ``clearDataForOrigin`` 收的是 origin。传个带 path 的进去它**不报错也不
+    生效** —— 归一化掉，比让人自己发现这件事强。
+
+    :param origin: 任意 URL 或 origin
+    :returns: ``scheme://netloc``
+    :raises ValueError: 缺 scheme 或 host
+    """
+    parts = urlsplit(origin)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(
+            f"origin={origin!r} needs a scheme and a host, e.g. 'https://example.com'"
+        )
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _same_document(here: str, there: str) -> bool:
+    """两个地址只差 fragment 吗 —— 那样的跳转不产生任何 lifecycle 事件。
+
+    :param here: 当前地址
+    :param there: 目标地址
+    :returns: 是同文档导航吗
+    """
+    a, b = urlsplit(here), urlsplit(there)
+    return a[:4] == b[:4] and a.fragment != b.fragment
+
 
 #: 交互方法收的目标形态。叫 ``Selectable`` 而不是 ``Target`` —— 这个文件里
 #: ``Target.createTarget`` / ``Target.attachToTarget`` 满地都是，同名会读岔
@@ -109,16 +173,25 @@ class Session:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def create(cls, transport: Transport, **kw: Any) -> Session:
+    def create(
+        cls, transport: Transport, *, browser_context_id: str | None = None, **kw: Any
+    ) -> Session:
         """新建一个 ``about:blank`` tab 并接管它 —— 默认路径。
 
-        落在默认 browser context 里，所以 Cookie 和登录态照样继承。
+        不给 ``browser_context_id`` 就落在默认 browser context 里，Cookie 和登录态
+        照样继承。
 
         :param transport: 浏览器级 WebSocket
+        :param browser_context_id: 把 tab 建在这个 browser context 里。一般不直接传 ——
+            用 :meth:`InstanceHandle.context() <sleight.pool.InstanceHandle.context>`，
+            它会连带管好 context 的销毁
         :param kw: 透传给构造函数（``human`` / ``rng`` / ``track_network``）
         :returns: ``owned_target=True`` 的 Session，退出时会关掉这个 tab
         """
-        tid = transport.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        params: dict[str, Any] = {"url": "about:blank"}
+        if browser_context_id is not None:
+            params["browserContextId"] = browser_context_id
+        tid = transport.call("Target.createTarget", params)["targetId"]
         try:
             sid = transport.call(
                 "Target.attachToTarget", {"targetId": tid, "flatten": True}
@@ -241,40 +314,185 @@ class Session:
         """
         # 不走 self.call：必须先拿到新的 loaderId 再排空事件，否则新导航的 lifecycle
         # 事件会因为 loaderId 还是旧的而被当成迟到事件丢掉
-        result = self._t.call("Page.navigate", {"url": url}, session_id=self._sid, timeout=timeout)
-        if err := result.get("errorText"):
-            raise SleightError(f"navigation to {url} failed: {err}")
+        self._renavigate(
+            lambda: self._t.call(
+                "Page.navigate", {"url": url}, session_id=self._sid, timeout=timeout
+            ),
+            what=url, same_document=None, wait=wait, timeout=timeout,
+        )
 
-        loader_id = result.get("loaderId")
-        self._frame_id = result.get("frameId")
+    def reload(
+        self,
+        *,
+        ignore_cache: bool = False,
+        wait: Condition = _DEFAULT_WAIT,
+        timeout: float = 60,
+    ) -> None:
+        """重新加载当前页面。
 
-        if loader_id is None:
-            # **同文档导航**（fragment / hash 路由）。Chrome 不会为它发任何 lifecycle
-            # 事件，所以等 DomReady/Load 会一路等到超时。
-            #
-            # 也**不能**把 _loader_id 置成 None：_handle 里 None 的含义是"接受一切
-            # loaderId"，那等于把导航纪元过滤器永久解除武装，之后每一次真导航都会被
-            # 上一轮的迟到事件立刻满足。
-            self.drain()
-            if wait.kind in ("domready", "load"):
+        **和 ``open(当前地址)`` 不是一回事。** ``Page.navigate`` 到同一个 URL 会命中
+        缓存，语义上是"再去一次"；``reload`` 是"刷新"。想复现"手动按 F5"的行为
+        （比如观察每次刷新出口 IP 变不变）就得用这个，别再靠"URL 挂个唯一查询参数"
+        去近似 —— 那改的是 URL，不是缓存语义。
+
+        ⚠️ **目标地址会重定向时，别用 ``DomReady`` / ``Load`` 当完成信号。** 一次
+        重定向是两次文档提交，中间那个文档也可能发出自己的 ``DOMContentLoaded``，于是
+        这个方法在链条走完之前就返回了。真机上量到过 3/8 的复现率（``http://`` 跳
+        ``https://``），换成直接访问 ``https://`` 是 0/8。要可靠就等页面自己的东西：
+
+            >>> s.reload(wait=Selector("#article-body"), timeout=60)
+
+        :param ignore_cache: True 相当于 Ctrl+Shift+R，绕过缓存重新拉所有资源
+        :param wait: 等待条件，默认 :class:`~sleight.core.types.DomReady`
+        :param timeout: 秒，覆盖导航和等待两段
+        :raises TimeoutError: 条件没在 ``timeout`` 内满足
+        """
+        self._renavigate(
+            lambda: self._t.call(
+                "Page.reload", {"ignoreCache": ignore_cache},
+                session_id=self._sid, timeout=timeout,
+            ),
+            what="reload", same_document=False, wait=wait, timeout=timeout,
+        )
+
+    def back(self, *, steps: int = 1, wait: Condition = _DEFAULT_WAIT,
+             timeout: float = 60) -> None:
+        """后退。
+
+        :param steps: 退几步。必须 ≥ 1
+        :param wait: 等待条件
+        :param timeout: 秒
+        :raises ValueError: ``steps < 1``
+        :raises SleightError: 历史里没有那么多可退的条目
+        """
+        self._history_go(-steps, wait=wait, timeout=timeout)
+
+    def forward(self, *, steps: int = 1, wait: Condition = _DEFAULT_WAIT,
+                timeout: float = 60) -> None:
+        """前进。参数同 :meth:`back`。"""
+        self._history_go(steps, wait=wait, timeout=timeout)
+
+    def history(self) -> tuple[int, list[dict[str, Any]]]:
+        """浏览历史。
+
+        :returns: ``(当前下标, 条目列表)``，条目是 CDP 的 ``NavigationEntry``
+        """
+        r = self.call("Page.getNavigationHistory")
+        return int(r.get("currentIndex", 0)), list(r.get("entries") or [])
+
+    def _history_go(self, delta: int, *, wait: Condition, timeout: float) -> None:
+        if abs(delta) < 1:
+            raise ValueError(f"steps must be at least 1, got {abs(delta)}")
+        index, entries = self.history()
+        target = index + delta
+        if not 0 <= target < len(entries):
+            direction = "back" if delta < 0 else "forward"
+            raise SleightError(
+                f"cannot go {direction} {abs(delta)} step(s): at entry {index} of "
+                f"{len(entries)}. Check session.history() first."
+            )
+
+        here = entries[index].get("url", "")
+        there = entries[target].get("url", "")
+        entry_id = entries[target]["id"]
+        self._renavigate(
+            lambda: self._t.call(
+                "Page.navigateToHistoryEntry", {"entryId": entry_id},
+                session_id=self._sid, timeout=timeout,
+            ),
+            what=there or "history entry",
+            # 只差 fragment 的两条历史是**同文档**导航，不会产生任何 lifecycle 事件。
+            # 判定放在这里而不是靠"等不到就当成同文档"：后者会把一次慢提交读成成功
+            same_document=_same_document(here, there),
+            wait=wait, timeout=timeout,
+        )
+
+    def _renavigate(
+        self,
+        send: Callable[[], dict[str, Any]],
+        *,
+        what: str,
+        same_document: bool | None,
+        wait: Condition,
+        timeout: float,
+    ) -> None:
+        """所有导航的公共骨架：换导航纪元，然后等条件。
+
+        「导航纪元」= 把 ``_loader_id`` 绑到当前文档，好让上一次导航的迟到 lifecycle
+        事件立刻满足这一次的等待这种事不发生。建立它有两个来源，都得要：
+
+        * ``Page.navigate`` 的响应里直接给 loaderId；
+          ``Page.reload`` / ``Page.navigateToHistoryEntry`` **不给**；
+        * ``Page.frameNavigated`` 事件。**每一次提交都要重新绑，不能只认第一条** ——
+          一次重定向就会产生两条（``http://example.com/`` → ``https://…`` 实测如此），
+          真正的生命周期事件挂在**后一个** loaderId 上。只认第一条的话一切看着都对，
+          就是 ``DomReady`` 永远等不到。这一条对 ``open()`` 同样成立：响应里那个
+          loaderId 未必是最终文档的，走 Fetch 拦截时尤其容易差这一跳。
+
+        换纪元必须**在观察者里当场**做：同一轮 drain 里紧跟着的 ``DOMContentLoaded``
+        要拿新 loaderId 去比对，晚一步就被丢掉。观察者一直挂到 :meth:`wait` 结束。
+
+        :param send: 发出导航命令，返回 CDP 的 result
+        :param what: 出错信息里用来指代这次导航的东西（URL / ``"reload"``）
+        :param same_document: ``True`` 明确是同文档跳转，``False`` 明确不是，
+            ``None`` 表示看响应里有没有 loaderId（``Page.navigate`` 用这个）
+        :param wait: 等待条件
+        :param timeout: 秒
+        """
+        committed: list[str] = []
+
+        def rebind(loader: str, frame_id: str | None) -> None:
+            committed.append(loader)
+            self._loader_id = loader
+            if frame_id is not None:
+                self._frame_id = frame_id
+            self._lifecycle.clear()
+            self._netidle.reset(frame_id=self._frame_id)
+
+        def commit(ev: Event) -> None:
+            if ev.method != "Page.frameNavigated":
                 return
+            frame = ev.params.get("frame") or {}
+            if self._frame_id is not None and frame.get("id") != self._frame_id:
+                return                                  # 子 frame 的导航不算
+            rebind(frame.get("loaderId") or "", frame.get("id"))
+
+        self.drain()                                    # 发命令之前先清一遍
+        with self.observe_events(commit):
+            result = send()
+            if err := result.get("errorText"):
+                raise SleightError(f"navigation to {what} failed: {err}")
+
+            loader = result.get("loaderId")
+            if same_document is None:
+                # **同文档导航**（fragment / hash 路由）不返回 loaderId，Chrome 也不会
+                # 为它发任何 lifecycle 事件 —— 等 DomReady/Load 就是等到超时。
+                #
+                # 也**不能**把 _loader_id 置成 None：那在 _handle 里的含义是"接受一切
+                # loaderId"，等于把纪元过滤器永久解除武装。
+                same_document = loader is None
+
+            # **先排空上一纪元的残留，再换纪元。** 响应回来之前缓冲区里可能还压着旧
+            # 文档的 Network.requestWillBeSent —— 顺序反了的话 reset() 刚清空集合，
+            # 紧接着的 drain() 又把它们塞回去，NetworkIdle 会等一批永远不结束的旧请求。
+            self.drain()
+
+            # 观察者已经从事件里认到更新的提交时，别用响应里那个旧的覆盖回去
+            if loader is not None and not committed:
+                rebind(loader, result.get("frameId"))
+
+            self.drain()                                # 新纪元的早到事件
+
+            if same_document:
+                if wait.kind in ("domready", "load"):
+                    return
+            elif not committed:
+                deadline = time.monotonic() + timeout
+                while not committed and (left := deadline - time.monotonic()) > 0:
+                    self._pump(timeout=min(_PUMP_SLICE, left))
+
+            # wait 也在观察者作用域内 —— 重定向链的后续提交要能继续换纪元
             self.wait(wait, timeout=timeout)
-            return
-
-        # **先排空上一纪元的残留事件，再 reset。** `Page.navigate` 的响应回来之前，
-        # 缓冲区里可能还压着旧文档的 Network.requestWillBeSent —— 顺序反过来的话
-        # reset() 刚清空集合，紧接着的 drain() 又把它们原样塞回去，`NetworkIdle`
-        # 会一直等一批永远不会结束的旧请求（只能靠 STALE_AFTER 兜底 15 秒）。
-        # 这些事件必然属于旧纪元：新文档的加载在 loaderId 下发之后才开始。
-        self.drain()
-
-        self._loader_id = loader_id
-        self._lifecycle.clear()
-        self._netidle.reset(frame_id=self._frame_id)
-        # 新纪元的早到事件（本次导航的 DOMContentLoaded 可能已经在队列里了）
-        self.drain()
-
-        self.wait(wait, timeout=timeout)
 
     def wait(self, cond: Condition, *, timeout: float = 30) -> None:
         """等一个条件成立。一次只收一个条件，要复合就连着调两次。
@@ -569,6 +787,67 @@ class Session:
         """
         self._input.click(target, click_count=2, **kw)
 
+    def drag(
+        self,
+        target: Selectable | Point | Box,
+        *,
+        to: Selectable | Point | Box | None = None,
+        by: tuple[int, int] | None = None,
+        human: HumanSwitch = None,
+        button: str = "left",
+    ) -> Point:
+        """按住 ``target`` 拖到别处。**纯鼠标事件** —— 滑块、画布、地图平移用这个。
+
+            >>> session.drag("#slider-handle", by=(212, 0))   # 滑块验证码
+            >>> session.drag(".card", to="#done-column")
+
+        HTML5 的 ``draggable=true`` 收不到纯鼠标事件，那种用 :meth:`drag_and_drop`。
+
+        拖拽段的 ``buttons`` 位掩码一路非零，过冲阈值也单列（滑块只有一两百像素宽，
+        指针移动那档 500 px 的阈值等于永不过冲），松手前还有一段迟滞 —— **到位即松手**
+        是滑块风控最爱抓的特征。
+
+        :param target: 抓哪。选择器 / :class:`~sleight.core.element.Element` /
+            :class:`~sleight.core.types.Point` / :class:`~sleight.core.types.Box`
+        :param to: 拖到哪，形态同上。与 ``by`` 二选一
+        :param by: ``(dx, dy)``，从实际抓取点算的相对位移
+        :param human: 三态开关，``None`` 继承 Session 默认
+        :param button: 按住哪个键拖
+        :returns: 松手的坐标
+        :raises ValueError: ``to`` / ``by`` 一个没给，或两个都给了
+        :raises ElementError: 起点没命中、被遮挡，或终点元素不在视口里
+        """
+        return self._input.drag(target, to=to, by=by, human=human, button=button)
+
+    def drag_and_drop(
+        self,
+        source: Selectable | Point | Box,
+        target: Selectable | Point | Box,
+        *,
+        human: HumanSwitch = None,
+        button: str = "left",
+        native: bool | None = None,
+    ) -> Point:
+        """把 ``source`` 拖到 ``target`` 上，HTML5 原生拖放与 JS 实现都吃。
+
+        默认自适应：按下、起步，然后看浏览器认不认这是原生拖放，再决定剩下的轨迹发
+        ``dragOver``/``drop`` 还是继续发 ``mouseMoved``。两种实现对**对方**的事件毫无
+        反应，猜错的表现是"一切正常但什么都没发生" —— 所以这里不猜。
+
+        :param source: 拖谁
+        :param target: 拖到哪
+        :param human: 三态开关，``None`` 继承 Session 默认
+        :param button: 按住哪个键拖
+        :param native: ``None`` 自适应（默认）；``True`` 要求必须原生可拖，否则报错；
+            ``False`` 只发鼠标事件，等价于 :meth:`drag`
+        :returns: 松手的坐标
+        :raises ElementError: 起点没命中、终点不在视口里，或 ``native=True`` 但元素
+            不是原生可拖的
+        """
+        return self._input.drag_and_drop(
+            source, target, human=human, button=button, native=native
+        )
+
     def type(
         self,
         target: Selectable | None,
@@ -631,27 +910,393 @@ class Session:
         """
         self._input.hover(target, human=human)
 
+    def select_option(
+        self, target: Selectable, *, value: str | None = None, label: str | None = None
+    ) -> str:
+        """选中 ``<select>`` 里的一项。
+
+            >>> s.select_option("#country", value="HK")
+            >>> s.select_option("#country", label="中国香港")
+
+        **不能只改 ``el.value``。** 那样页面上的 ``change`` handler 一个都不会跑 ——
+        联动的二级下拉不刷新、表单校验不触发，而页面看上去是对的。这里改完会补发
+        ``input`` 和 ``change``（都 ``bubbles``），和用户真选一样。
+
+        用 evaluate 而不是键鼠：原生下拉框展开的是**操作系统的**弹出列表，它根本不在
+        页面里，鼠标事件够不着。这是少数几个必须用 JS 的地方。
+
+        :param target: ``<select>`` 元素。选择器或 :class:`~sleight.core.element.Element`
+        :param value: 按 ``<option value>`` 选。与 ``label`` 二选一
+        :param label: 按选项显示文本选（去空白后精确匹配）
+        :returns: 选中项的 ``value``
+        :raises ValueError: ``value`` / ``label`` 一个没给或给了两个
+        :raises ElementError: 元素不存在、不是 ``<select>``、或没有匹配的选项
+        """
+        if (value is None) == (label is None):
+            raise ValueError("select_option() takes exactly one of value= / label=")
+
+        element = self.require(target)
+        wanted = json.dumps(value if value is not None else label)
+        by = "value" if value is not None else "label"
+        result = element._eval(f"""
+            if (el.tagName !== 'SELECT') return {{error: 'not a <select>, it is a <' +
+                el.tagName.toLowerCase() + '>'}};
+            const want = {wanted}, by = {json.dumps(by)};
+            const hit = Array.from(el.options).find(
+                o => (by === 'value' ? o.value : o.textContent.trim()) === want);
+            if (!hit) return {{error: 'no option with ' + by + '=' + JSON.stringify(want) +
+                '; available: ' + JSON.stringify(Array.from(el.options).map(
+                    o => by === 'value' ? o.value : o.textContent.trim()))}};
+            hit.selected = true;
+            // 两个都要发，而且都要 bubbles —— 只发 change 的话用 input 监听的框架收不到
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return {{value: hit.value}};
+        """)
+        if result is None:
+            raise ElementError(f"{element!r} is gone")
+        if error := result.get("error"):
+            raise ElementError(f"{element!r}: {error}")
+        return str(result["value"])
+
+    def upload_file(
+        self, target: Selectable, *paths: str, allow_empty: bool = False
+    ) -> None:
+        """给 ``<input type=file>`` 塞文件。
+
+            >>> s.upload_file("#avatar", "/data/uploads/me.png")
+
+        ⚠️ **路径是「浏览器所在那台机器」上的路径**，不是跑脚本这台。浏览器在容器里
+        跑的时候，文件得先进容器（挂卷或 ``docker cp``）。
+
+        ⚠️ **浏览器不校验路径存在。** 实测传一个不存在的路径，CDP 不报错，
+        ``FileList`` 里照样多出一项，只是 ``size`` 为 0 —— 表单于是上传了一个空文件，
+        而脚本这边一切正常。所以这里会读回来查一遍，0 字节直接报错。真要传空文件用
+        ``allow_empty=True``。
+
+        走 ``DOM.setFileInputFiles``，不是伪造 ``change`` 事件：``FileList`` 在 JS 里
+        造不出来，伪造的事件里 ``files`` 是空的。
+
+        :param target: ``<input type=file>``
+        :param paths: 一个或多个**浏览器端**的绝对路径。多个需要 ``multiple``
+        :param allow_empty: 允许 0 字节的文件
+        :raises ValueError: 一个路径都没给
+        :raises ElementError: 元素不存在，或塞进去的文件是 0 字节（多半是路径写错了）
+        :raises ProtocolError: 元素不是文件输入框
+        """
+        if not paths:
+            raise ValueError("upload_file() needs at least one path")
+        element = self.require(target)
+        object_id = element.object_id()
+        try:
+            self.call("DOM.setFileInputFiles", {"files": list(paths), "objectId": object_id})
+        finally:
+            # 不释放会把节点钉在内存里
+            with contextlib.suppress(SleightError):
+                self.call("Runtime.releaseObject", {"objectId": object_id})
+
+        if allow_empty:
+            return
+        landed = element._eval(
+            "return Array.from(el.files || []).map(f => [f.name, f.size]);"
+        ) or []
+        if empty := [name for name, size in landed if not size]:
+            raise ElementError(
+                f"{element!r}: {empty} came out 0 bytes. Chrome does not check that an "
+                f"upload path exists — it just makes an empty File. Note the paths are on "
+                f"the machine running the browser, not this one. Pass allow_empty=True if "
+                f"an empty file is really what you want. Asked for: {list(paths)}"
+            )
+
+    def set_viewport(self, width: int, height: int, *, scale: float = 1.0) -> None:
+        """改视口尺寸，立即生效，不用重启实例。
+
+            >>> s.set_viewport(1280, 2400)      # 拉高，一次性触发懒加载
+            >>> s.clear_viewport()
+
+        ⚠️ **这是渲染层的覆盖，改不了 ``screen.width`` / ``screen.height``** ——
+        那两个是 profile 的指纹字段，由实例启动参数决定。所以窗口比屏幕还大这种组合
+        是做得出来的，而它本身就是一个特征。临时用可以，别把它当成"改分辨率"。
+
+        :param width: CSS 像素，必须 > 0
+        :param height: CSS 像素，必须 > 0
+        :param scale: 页面缩放
+        :raises ValueError: 宽或高 ≤ 0
+        """
+        if width <= 0 or height <= 0:
+            raise ValueError(f"viewport must be positive, got {width}x{height}")
+        self.call("Emulation.setDeviceMetricsOverride", {
+            "width": int(width), "height": int(height),
+            "deviceScaleFactor": scale, "mobile": False,
+        })
+
+    def clear_viewport(self) -> None:
+        """撤掉 :meth:`set_viewport` 的覆盖。幂等。
+
+        ⚠️ **撤掉覆盖 ≠ 尺寸变回去。** 这条命令只保证"不再有覆盖"，之后窗口是多大由
+        浏览器说了算。Chromium 146 + Xvnc 上实测（每次都用新 tab，重复 4 轮）：
+
+        ==== ============== ================ ==========================
+        轮次  set(900,2400)  clear 之后
+        ==== ============== ================ ==========================
+        #0   (900, 2400)    (1928, 957)      弹回来了，但不等于覆盖前的 (1920, 947)
+        #1   (900, 2400)    **(900, 2400)**  根本没变
+        #2   (900, 2400)    (1928, 957)
+        #3   (900, 2400)    **(900, 2400)**
+        ==== ============== ================ ==========================
+
+        重复调 ``clear`` 没用（连发三次，结果一样）。**别依赖撤销之后的尺寸** ——
+        要什么尺寸就 :meth:`set_viewport` 到什么尺寸。
+        """
+        self.call("Emulation.clearDeviceMetricsOverride")
+
     # ------------------------------------------------------------------ #
     # 杂项
     # ------------------------------------------------------------------ #
 
-    def screenshot(self, path: str | None = None) -> bytes:
-        """整页截图，PNG。
+    def screenshot(
+        self, path: str | None = None, *, target: Selectable | None = None
+    ) -> bytes:
+        """截图，PNG。
 
-        画面以**实际 viewport** 为准，不是 framebuffer。
+            >>> s.screenshot("page.png")                  # 整个 viewport
+            >>> s.screenshot("captcha.png", target="#captcha img")
+
+        整页时画面以**实际 viewport** 为准，不是 framebuffer。
 
         :param path: 给了就同时把字节写到这个文件
+        :param target: 只截这个元素。不在视口里会先滚进来，然后**重新取 box**
         :returns: PNG 字节
+        :raises ElementError: ``target`` 不存在或宽高为 0
         """
-        data = base64.b64decode(self.call("Page.captureScreenshot", {"format": "png"})["data"])
+        params: dict[str, Any] = {"format": "png"}
+        if target is not None:
+            params["clip"] = self._element_clip(target)
+            # clip 用的是**页面**坐标，可能落在当前 viewport 之外
+            params["captureBeyondViewport"] = True
+
+        data = base64.b64decode(self.call("Page.captureScreenshot", params)["data"])
         if path:
             with open(path, "wb") as fh:
                 fh.write(data)
         return data
 
-    def cookies(self) -> list[dict[str, Any]]:
-        """当前页面可见的 Cookie。需要构造时 ``track_network=True``（默认）。"""
-        return self.call("Network.getCookies").get("cookies", [])
+    def _element_clip(self, target: Selectable) -> dict[str, float]:
+        """元素的截图裁剪框。
+
+        ``Element.box()`` 是 ``getBoundingClientRect()``，**viewport** 坐标；而
+        ``captureScreenshot`` 的 clip 是**页面**坐标。差一个滚动偏移 —— 忘了加就是
+        滚过之后截出来的图整体偏移，而且页面没滚动时完全正常，测不出来。
+        """
+        element = self.require(target)
+        if not element.in_viewport():
+            self._input.scroll_into_view(element)
+        box = element.require_box()
+        scroll_x, scroll_y = self.eval("[window.scrollX, window.scrollY]") or [0, 0]
+        return {
+            "x": box.x + scroll_x, "y": box.y + scroll_y,
+            "width": box.w, "height": box.h, "scale": 1,
+        }
+
+    def exit_ip(self, *, endpoints: Iterable[str] | None = None, timeout: float = 15.0) -> str:
+        """本会话走出去的公网 IP。
+
+            >>> with inst.context() as ctx, ctx.session() as s:
+            ...     print(s.exit_ip())      # 这一轮走的哪个出口
+
+        被拦时的第一线索。自己实现有两个坑，这里都躲开了：
+
+        * **只用纯文本端点。** 拿 IP 查询站的首页去 ``innerText`` 里挑，第一个 IP
+          未必是出口地址 —— 一组实验会因此被读成无效结论；
+        * **用 :mod:`ipaddress` 校验，不手写正则。** 页面上的 ``12:34:56`` 能匹配
+          大多数 IPv6 正则，``2026.08.06`` 能匹配 IPv4 正则。
+
+        请求从**页面里**发出去，所以走的是浏览器的 socket pool 和代理 —— 这正是要
+        测的东西。代价是页面的 CSP 可能挡掉它；在 ``about:blank`` 上调最稳。
+
+        :param endpoints: 纯文本 IP 端点，按顺序试。``None`` 用内置的三个
+        :param timeout: 单个端点的上限，秒
+        :returns: IP 字符串
+        :raises SleightError: 所有端点都没给出合法 IP，消息里列出每个端点的结果
+        """
+        tried: list[str] = []
+        for url in endpoints if endpoints is not None else EXIT_IP_ENDPOINTS:
+            try:
+                raw = self.eval(
+                    f"fetch({json.dumps(url)}, {{cache: 'no-store',"
+                    f" signal: AbortSignal.timeout({int(timeout * 1000)})}})"
+                    ".then(r => r.ok ? r.text() : null).then(t => t && t.trim().slice(0, 64))"
+                )
+            except (ProtocolError, TimeoutError) as exc:
+                tried.append(f"{url}: {type(exc).__name__}")
+                continue
+            try:
+                return str(ipaddress.ip_address(str(raw).strip()))
+            except ValueError:
+                tried.append(f"{url}: {raw!r} is not an IP address")
+
+        raise SleightError("could not determine the exit IP. " + "; ".join(tried))
+
+    @contextlib.contextmanager
+    def block(
+        self,
+        *,
+        types: Iterable[str] | None = None,
+        url_patterns: Iterable[str] | None = None,
+    ) -> Iterator[BlockStats]:
+        """屏蔽请求。正文采集不需要图片、广告、字体、媒体。
+
+            >>> with s.block(types=["Image", "Media", "Font"]) as blocked:
+            ...     s.open(url)
+            >>> blocked.by_type
+            {'Image': 34, 'Font': 6}
+
+        走计费住宅代理的话这直接是省钱，而且页面加载更快、超时更少。
+
+        裁决走 :meth:`Transport.urgent_events() <sleight.core.transport.Transport.urgent_events>`
+        —— 读到就回，**不进事件缓冲**。这一点是必须的而不是优化：普通事件在 ``call()``
+        期间只进缓冲、等调用返回才派发，而 ``Page.navigate`` 的响应又要等文档请求放行，
+        于是双方互等，整个 :meth:`open` 死等到超时。真机上撞过。
+
+        :param types: 按 CDP ``ResourceType`` 屏蔽（``Image`` / ``Media`` / ``Font`` /
+            ``Stylesheet`` / ``Script`` / ``XHR`` …）
+        :param url_patterns: 按 URL 屏蔽，:mod:`fnmatch` 通配（``"*://ads.*"``）。
+            和 ``types`` 是**或**关系
+        :returns: 上下文管理器，产出 :class:`~sleight.core.resources.BlockStats`。
+            退出后仍然可读
+        :raises ValueError: 两个都没给，或 ``types`` 里有不认识的 ResourceType
+        """
+        kinds = frozenset(types or ())
+        patterns = tuple(url_patterns or ())
+        if not kinds and not patterns:
+            raise ValueError("block() needs types= or url_patterns=; blocking nothing is a no-op")
+        if unknown := sorted(kinds - RESOURCE_TYPES):
+            raise ValueError(
+                f"unknown ResourceType(s) {unknown}. Valid values are {sorted(RESOURCE_TYPES)}"
+            )
+
+        stats = BlockStats()
+
+        def decide(ev: Event) -> bool:
+            if ev.method != "Fetch.requestPaused" or ev.session_id != self._sid:
+                return False
+            kind = ev.params.get("resourceType", "Other")
+            url = (ev.params.get("request") or {}).get("url", "")
+            hit = kind in kinds or any(fnmatch(url, p) for p in patterns)
+            # 只能 fire-and-forget：这个回调跑在 recv 的调用栈里，call() 会递归读同一个
+            # socket。quiet=True 是因为请求可能在我们回应之前就被浏览器自己取消了 ——
+            # 那时候报的 Invalid InterceptionId 是正常现象，不该炸掉一段无关的动作
+            self._t.send_no_wait(
+                "Fetch.failRequest" if hit else "Fetch.continueRequest",
+                {"requestId": ev.params["requestId"],
+                 **({"errorReason": "BlockedByClient"} if hit else {})},
+                session_id=self._sid,
+                quiet=True,
+            )
+            stats._count(kind, blocked=hit)
+            return True
+
+        self.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]})
+        try:
+            with self._t.urgent_events(decide):
+                yield stats
+        finally:
+            # disable 会放行所有还挂着的请求 —— 中途抛异常也不会把页面卡死
+            with contextlib.suppress(SleightError):
+                self.call("Fetch.disable")
+
+    def cookies(self, urls: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        """Cookie。需要构造时 ``track_network=True``（默认）。
+
+        :param urls: 只要这些 URL 能看到的 cookie。``None`` = 当前页面可见的那些。
+            查"某个 origin 下有哪些 cookie"用这个，不用先导航过去
+        :returns: CDP 的 ``Cookie`` 字典列表
+        """
+        params = {} if urls is None else {"urls": list(urls)}
+        return self.call("Network.getCookies", params).get("cookies", [])
+
+    def clear_site_data(
+        self, origin: str, *, types: Iterable[StorageType | str] | None = None
+    ) -> ClearReport:
+        """清掉一个 origin 的站点数据。
+
+            >>> s.clear_site_data("https://www.example.com")
+            >>> s.clear_site_data("https://www.example.com", types=[StorageType.COOKIES])
+
+        **按 origin 收敛是安全默认值。** 全局清理会把别的站点的登录态一起端掉 ——
+        依赖插件（付费墙解锁一类）的场景下这是致命的。要全清用
+        :meth:`clear_browser_data`，那必须是显式动作。
+
+        **默认清的不止 cookie。** 只清 cookie 会被 ``localStorage`` / ``indexedDB``
+        里的副本立刻还原 —— 反检测服务的设备标识不只落在 cookie 上。默认这五类：
+        ``cookies`` / ``local_storage`` / ``indexeddb`` / ``cache_storage`` /
+        ``service_workers``。
+
+        :param origin: ``https://host[:port]``。带了 path / query 会被归一化掉
+        :param types: 要清哪几类，见 :class:`~sleight.core.types.StorageType`。
+            ``None`` = 上面那五类
+        :returns: :class:`~sleight.core.types.ClearReport` —— 清掉了哪些 cookie、
+            占用字节前后各是多少。CDP 的清理命令什么都不返回，这份账是这里现测的
+        :raises ValueError: ``origin`` 缺 scheme 或 host，或 ``types`` 里有不认识的值
+        """
+        origin = _normalize_origin(origin)
+        wanted = tuple(
+            StorageType(t) for t in (types if types is not None else _DEFAULT_CLEAR_TYPES)
+        )
+        if not wanted:
+            raise ValueError("clear_site_data() needs at least one storage type")
+
+        before = self._origin_cookies(origin)
+        usage_before = self._origin_usage(origin)
+
+        self.call("Storage.clearDataForOrigin", {
+            "origin": origin, "storageTypes": ",".join(t.value for t in wanted)
+        })
+
+        after = self._origin_cookies(origin)
+        gone: tuple[str, ...] | None = None
+        if before is not None and after is not None:
+            survivors = {c.get("name") for c in after}
+            gone = tuple(str(c.get("name")) for c in before if c.get("name") not in survivors)
+
+        return ClearReport(
+            origin=origin,
+            types=wanted,
+            cookies=gone,
+            usage_before=usage_before,
+            usage_after=self._origin_usage(origin),
+        )
+
+    def clear_browser_data(self, *, cookies: bool = True, cache: bool = True) -> None:
+        """浏览器级全清。
+
+        ⚠️ **会掉所有站点的登录态** —— 包括你没想动的那些。想只清一个站点用
+        :meth:`clear_site_data`，那才是安全默认值。
+
+        :param cookies: 清 ``Network.clearBrowserCookies``
+        :param cache: 清 ``Network.clearBrowserCache``
+        """
+        if cookies:
+            self.call("Network.clearBrowserCookies")
+        if cache:
+            self.call("Network.clearBrowserCache")
+
+    def _origin_cookies(self, origin: str) -> list[dict[str, Any]] | None:
+        """``None`` = 没测成（Network domain 没开），区别于"一个都没有"。"""
+        try:
+            return self.cookies(urls=[origin])
+        except (ProtocolError, SleightError):
+            log.debug("could not read cookies for %s", origin, exc_info=True)
+            return None
+
+    def _origin_usage(self, origin: str) -> int:
+        try:
+            return int(self.call(
+                "Storage.getUsageAndQuota", {"origin": origin}
+            ).get("usage", 0))
+        except (ProtocolError, SleightError):
+            log.debug("could not read storage usage for %s", origin, exc_info=True)
+            return 0
 
     def close(self) -> None:
         """关闭会话。幂等，可以重复调。

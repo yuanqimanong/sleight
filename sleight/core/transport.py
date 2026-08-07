@@ -19,8 +19,8 @@ import socket
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import websocket
@@ -60,6 +60,9 @@ class Transport:
         self._methods: dict[int, str] = {}                     # id -> method，用于错误定位
         self._results: dict[int, protocol.Response] = {}       # 已到、未消费
         self._abandoned: set[int] = set()                      # 超时放弃的 id，响应到了直接丢
+        self._quiet: set[int] = set()                          # 允许失败的 id，flush 不为它们抛
+        #: 读到就立刻处理的事件 handler，绕过缓冲。见 urgent_events()
+        self._urgent: list[Callable[[protocol.Event], bool]] = []
         # 事件**按 sessionId 分桶**。共用一个队列会让先排空的那个 Session 把别人的
         # 事件一并弹走并丢掉 —— 另一个 Session 就永远等不到自己的 load。
         self._events: dict[str | None, deque[protocol.Event]] = {}
@@ -187,6 +190,7 @@ class Transport:
         params: dict[str, Any] | None = None,
         *,
         session_id: str | None = None,
+        quiet: bool = False,
     ) -> int:
         """分配 id、发出、**立即返回**，不等响应。
 
@@ -197,6 +201,10 @@ class Transport:
         :param method: CDP 方法名
         :param params: 参数对象
         :param session_id: 目标会话；``None`` 表示浏览器级命令
+        :param quiet: 这条命令**允许失败**，:meth:`flush` 不为它抛。给"回应一个可能
+            已经不存在的东西"用 —— 典型是 ``Fetch.continueRequest``：请求可能在我们
+            回应之前就被浏览器自己取消了，这时候报的 ``Invalid InterceptionId`` 是
+            正常现象，不该炸掉一段无关的输入动作
         :returns: 这条消息的 id
         :raises ConnectionError: 发送失败
         """
@@ -216,6 +224,8 @@ class Transport:
             self._raise_lost(f"CDP send failed on {method}: {exc}", cause=exc)
         self._inflight.add(msg_id)
         self._methods[msg_id] = method
+        if quiet:
+            self._quiet.add(msg_id)
         return msg_id
 
     def flush(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
@@ -240,11 +250,16 @@ class Transport:
         for msg_id in sorted(self._results):
             resp = self._results.pop(msg_id)
             method = self._methods.pop(msg_id, "?")
+            if msg_id in self._quiet:
+                if resp.error is not None:
+                    log.debug("ignoring error on quiet %s: %s", method, resp.error)
+                continue
             if resp.error is not None and first_error is None:
                 first_error = ProtocolError(
                     str(resp.error), code=resp.error.code, method=method
                 )
         self._methods.clear()
+        self._quiet.clear()
         if first_error is not None:
             raise first_error
 
@@ -335,11 +350,53 @@ class Transport:
                 self._abandoned.discard(msg.id)
                 return
             self._results[msg.id] = msg
-        else:
+        elif not self._dispatch_now(msg):
             bucket = self._events.get(msg.session_id)
             if bucket is None:
                 bucket = self._events.setdefault(msg.session_id, deque(maxlen=MAX_EVENT_BUFFER))
             bucket.append(msg)
+
+    def _dispatch_now(self, event: protocol.Event) -> bool:
+        """立刻处理这条事件的机会。处理了返回 True，就不再进缓冲。
+
+        :returns: 有 handler 认领了吗
+        """
+        for handler in self._urgent:
+            try:
+                if handler(event):
+                    return True
+            except Exception:
+                log.warning("urgent event handler %r raised; buffering instead", handler,
+                            exc_info=True)
+        return False
+
+    @contextmanager
+    def urgent_events(
+        self, handler: Callable[[protocol.Event], bool]
+    ) -> Iterator[Callable[[protocol.Event], bool]]:
+        """挂一个**读到就立刻处理**的事件 handler，绕过缓冲。
+
+        普通事件在 :meth:`call` 期间只进缓冲，等调用返回后才由 ``drain()`` 派发。对
+        99% 的事件这是对的。但对**必须回应才能让调用返回**的事件就是死锁：
+
+            Fetch.enable → Page.navigate → 文档请求被暂停 → 等我们放行
+                                    ↑                              ↓
+                                    └──── 我们卡在 navigate 的响应上 ┘
+
+        认领了（返回 True）的事件不再进缓冲，也就不会再喂给 ``Session`` 的观察者。
+
+        ⚠️ handler 在 ``recv`` 的调用栈里跑，**只能 fire-and-forget**
+        （``send_no_wait``）。在里面 ``call()`` 会递归读同一个 socket。
+
+        :param handler: 吃 :class:`~sleight.core.protocol.Event`，认领了返回 True
+        :returns: 上下文管理器；退出时自动摘掉
+        """
+        self._urgent.append(handler)
+        try:
+            yield handler
+        finally:
+            with suppress(ValueError):
+                self._urgent.remove(handler)
 
     def _raise_lost(self, message: str, *, cause: BaseException | None = None) -> None:
         """租约失效导致的掉线要抛 LeaseLost，普通掉线抛 ConnectionError。"""

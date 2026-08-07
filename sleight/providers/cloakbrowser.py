@@ -8,17 +8,85 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from ..core.errors import InstanceError, NotFound
+from ..core.errors import InstanceError, NotFound, NotReady
 from ..core.types import InstanceInfo, InstanceStatus
 from .base import HTTPProvider
 
 log = logging.getLogger("sleight.cloakbrowser")
 
-__all__ = ["CloakBrowserManager", "ProfileSpec"]
+__all__ = ["CLEAR", "UNSET", "CloakBrowserManager", "ProfileSpec"]
+
+
+class _Sentinel:
+    """只为身份比较而存在。``__slots__`` 空，不可被误当成字符串用。"""
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __repr__(self) -> str:
+        return self._name
+
+
+#: 「**不下发这个字段**」—— Manager 保留原值。等价于 ``None``，只是读起来不含糊
+UNSET = _Sentinel("UNSET")
+
+#: 「**下发空值，真的清掉它**」。
+#:
+#: 这两个哨兵是为了消灭一个只差一个字符、行为却完全相反的陷阱：``proxy=None``
+#: 是"别动它"，而 ``proxy=""`` 是"清空"，从签名 ``proxy: str | None = None`` 上
+#: 一点都看不出来。现在裸空串会被**拒绝**并指向 :data:`CLEAR`。
+CLEAR = _Sentinel("CLEAR")
+
+#: 可清空的字符串字段。``None`` / :data:`UNSET` = 不下发，:data:`CLEAR` = 清空
+Clearable = str | _Sentinel | None
+
+
+def _absent(value: Any) -> bool:
+    """这个字段"没有值"吗 —— ``None`` 和两个哨兵都算。"""
+    return value is None or isinstance(value, _Sentinel)
+
+
+def _text(value: Any) -> str:
+    """拿来做字符串检查时用，哨兵一律当空串。"""
+    return "" if _absent(value) else str(value)
+
+
+#: ``fingerprint_seed`` 的取值范围。上界取 2**31-1，跟 Manager 那边的 int 字段对齐
+SEED_MAX = 2**31 - 1
+
+
+def _random_seed() -> int:
+    """摇一个指纹种子。用 :mod:`secrets` 而不是 :mod:`random` —— 后者是可预测的
+    Mersenne Twister，而这个值的全部意义就是不可预测。"""
+    return secrets.randbelow(SEED_MAX) + 1
+
+
+def _created_before(profile: dict[str, Any], cutoff: datetime) -> bool:
+    """这个 profile 建于 ``cutoff`` 之前吗。
+
+    时间戳读不出来时返回 ``False`` —— 批量删除里"看不懂就不删"是唯一安全的默认值。
+    """
+    raw = profile.get("created_at") or profile.get("createdAt")
+    if not isinstance(raw, str):
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        log.debug("unparseable created_at %r on %s", raw, profile.get("name"))
+        return False
+    if stamp.tzinfo is None:                 # Manager 偶尔给不带时区的，当 UTC
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp < cutoff
+
 
 TOKEN_ENV = "SLEIGHT_CLOAK_TOKEN"
 API = "/api/profiles"
@@ -68,19 +136,29 @@ class ProfileSpec:
 
     name: str
     # 网络
-    proxy: str | None = None                    # socks5://user:pass@host:port
+    proxy: Clearable = None                     # socks5://user:pass@host:port
     geoip: bool = False                         # 由代理出口 IP 推导时区/语言
     # 身份
-    timezone: str | None = None
-    locale: str | None = None
+    timezone: Clearable = None
+    locale: Clearable = None
     platform: Platform = "windows"
-    user_agent: str | None = None               # None = 浏览器自带
-    fingerprint_seed: int | None = None         # 固定则指纹可复现
+    user_agent: Clearable = None                # None = 浏览器自带
+    fingerprint_seed: int | Literal["random"] | None = None
+    """canvas / WebGL 指纹的种子。
+
+    * ``None`` —— 不下发，由 Manager 决定；
+    * 整数 —— **可复现，也意味着可被长期追踪**。重启换了 IP、清了 cookie 之后，
+      canvas/WebGL 指纹仍然是同一个，站点照样认得出这是同一台"机器"；
+    * ``"random"`` —— 下发前现摇一个。要"每个实例一个全新身份"就用它。
+
+    这个权衡没有普适答案：调试要可复现，采集要不可追踪。默认 ``None`` 是因为库不该
+    替你选，但**别把同一个整数复用到一批 profile 上** —— 那等于给它们发了同一张身份证。
+    """
     # 硬件
     screen_width: int = 1920
     screen_height: int = 1080
-    gpu_vendor: str | None = None
-    gpu_renderer: str | None = None
+    gpu_vendor: Clearable = None
+    gpu_renderer: Clearable = None
     hardware_concurrency: int | None = None
     # 行为
     headless: bool = False
@@ -92,7 +170,7 @@ class ProfileSpec:
     human_preset: str = "default"
     # 元信息
     tags: tuple[str, ...] = ()
-    notes: str | None = None
+    notes: Clearable = None
 
     # ---------------------------- 预设 -------------------------------- #
 
@@ -147,6 +225,33 @@ class ProfileSpec:
         spec.validate()
         return spec
 
+    @classmethod
+    def randomized(cls, name: str, preset: str = "windows_us", **kw: Any) -> ProfileSpec:
+        """一个预设 + 一个**现摇的指纹种子**。要"每个实例一个全新身份"就用它。
+
+            >>> specs = [ProfileSpec.randomized(f"scrape-{i:02d}") for i in range(10)]
+
+        等价于 ``ProfileSpec.windows_us(name, fingerprint_seed="random")``，只是把
+        这件容易忘的事摆到名字上。
+
+        :param name: profile 名
+        :param preset: ``windows_us`` / ``windows_hk`` / ``macos_us`` / ``linux_us``
+        :param kw: 覆盖任意字段
+        :returns: 已校验的 spec
+        :raises ValueError: 预设名不认识，或覆盖出了自相矛盾的组合
+        """
+        factory = {
+            "windows_us": cls.windows_us, "windows_hk": cls.windows_hk,
+            "macos_us": cls.macos_us, "linux_us": cls.linux_us,
+        }.get(preset)
+        if factory is None:
+            raise ValueError(
+                f"unknown preset {preset!r}; expected one of "
+                "windows_us / windows_hk / macos_us / linux_us"
+            )
+        kw.setdefault("fingerprint_seed", "random")
+        return factory(name, **kw)
+
     def replace(self, **kw: Any) -> ProfileSpec:
         """派生一个改了若干字段的新 spec，原对象不变。**不做校验** ——
         下发时才校验。
@@ -167,8 +272,7 @@ class ProfileSpec:
         :raises UserWarning: 分辨率罕见 —— 只警告不报错，罕见本身就是熵
         """
         problems: list[str] = []
-        r = (self.gpu_renderer or "") + " " + (self.gpu_vendor or "")
-        rl = r.lower()
+        rl = f"{_text(self.gpu_renderer)} {_text(self.gpu_vendor)}".lower()
 
         if self.platform == "windows" and ("apple" in rl or "metal" in rl):
             problems.append("platform='windows' but the GPU string is an Apple/Metal renderer")
@@ -177,16 +281,32 @@ class ProfileSpec:
         if self.platform == "linux" and ("direct3d" in rl or "metal" in rl):
             problems.append("platform='linux' but the GPU string is a Direct3D/Metal renderer")
 
-        if self.geoip and (self.timezone or self.locale):
+        if self.geoip and (_text(self.timezone) or _text(self.locale)):
             problems.append(
                 "geoip=True derives timezone/locale from the proxy exit IP; "
                 "setting them by hand fights it — pick one"
             )
-        if self.geoip and not self.proxy:
+        if self.geoip and not _text(self.proxy):
             problems.append("geoip=True without a proxy has nothing to derive from")
 
-        if ua := self.user_agent:
-            ual = ua.lower()
+        seed = self.fingerprint_seed
+        if not (seed is None or seed == "random" or isinstance(seed, int)):
+            problems.append(
+                f"fingerprint_seed={seed!r} must be an int, the string 'random', or None"
+            )
+        elif isinstance(seed, int) and not 1 <= seed <= SEED_MAX:
+            problems.append(f"fingerprint_seed={seed} is outside 1..{SEED_MAX}")
+
+        for name in ("proxy", "timezone", "locale", "user_agent", "gpu_vendor",
+                     "gpu_renderer", "notes"):
+            if getattr(self, name) == "":
+                problems.append(
+                    f"{name}='' and {name}=None differ by one character and do the "
+                    f"opposite thing (clear vs. keep). Pass CLEAR to clear it, or "
+                    f"UNSET/None to leave it alone"
+                )
+
+        if ual := _text(self.user_agent).lower():
             declared = (
                 "macos" if "macintosh" in ual or "mac os x" in ual
                 else "linux" if "linux" in ual and "android" not in ual
@@ -215,17 +335,24 @@ class ProfileSpec:
     def to_payload(self) -> dict[str, Any]:
         """转成 ``POST /api/profiles`` 的 JSON body。
 
-        ``None`` 的字段直接丢掉（让 Manager 用默认值），``tags`` 转成
-        ``[{"tag": ...}]``，``launch_args`` 转成 list。
+        ``None`` 和 :data:`UNSET` 的字段直接丢掉（让 Manager 用默认值），
+        :data:`CLEAR` 下发成空串（真的清掉），``tags`` 转成 ``[{"tag": ...}]``，
+        ``launch_args`` 转成 list。
 
         :returns: 可直接 POST 的 dict
         """
         payload: dict[str, Any] = {}
         for f in fields(self):
             value = getattr(self, f.name)
-            if value is None:
+            if value is None or value is UNSET:
                 continue
-            if f.name == "tags":
+            if value is CLEAR:
+                payload[f.name] = ""
+            elif f.name == "fingerprint_seed" and value == "random":
+                # 现摇。**每次 to_payload() 摇一个新的** —— 在 __post_init__ 里定死的话，
+                # 一个 spec 复用给 N 个 profile 就又变成同一张身份证了
+                payload[f.name] = _random_seed()
+            elif f.name == "tags":
                 if value:
                     payload["tags"] = [{"tag": t} for t in value]
             elif f.name == "launch_args":
@@ -397,13 +524,22 @@ class CloakBrowserManager(HTTPProvider):
         ``chrome-extension://<32位id>/…`` 出现在这个列表里。MV3 的 service worker
         起来要几秒，太快查会是空的。
 
+        ⚠️ 实例**没在运行**时抛 :class:`~sleight.core.errors.NotReady`，不是返回空列表。
+        两者用同一个返回值表示的话，"实例没起来"会被读成"扩展没加载" —— 而这两件事
+        的处理方式完全相反。
+
         :param instance_id: profile id
-        :returns: target 列表。实例没在运行时是空列表（Manager 返回 404）
+        :returns: target 列表。跑着但一个 target 都没有时是空列表
+        :raises NotReady: 实例没在运行（Manager 返回 404）
         :raises InstanceError: Manager 返回了别的状态码
         """
         r = self._http.get(self._instance_path(instance_id, "/cdp/json/list"))
         if r.status == 404:
-            return []
+            raise NotReady(
+                f"{self.name}: instance {instance_id} is not running, so it has no CDP "
+                "targets. This is not the same as 'running but no extension loaded' — "
+                "call ensure_ready() or launch() first."
+            )
         if not r.ok or not isinstance(r.body, list):
             raise InstanceError(f"{self.name}: cdp/json/list returned {r.status} {r.detail}")
         return list(r.body)
@@ -444,6 +580,11 @@ class CloakBrowserManager(HTTPProvider):
             return self.create_profile(spec)
 
         payload = spec.to_payload()
+        if spec.fingerprint_seed == "random":
+            # "random" 的意思是**建的时候**摇一个，不是每次 ensure 都换一张身份证。
+            # 不摘掉的话 to_payload() 每次给一个新值，diff 必然非空，于是每跑一遍脚本
+            # 这个 profile 的 canvas/WebGL 指纹就变一次 —— 幂等在这里是硬要求
+            payload.pop("fingerprint_seed", None)
         diff = {k: v for k, v in payload.items() if k != "tags" and existing.get(k) != v}
 
         # tags 要按归一化形状比：服务端存的是 [{tag, color}]，spec 给的是 [{tag}]，
@@ -459,20 +600,129 @@ class CloakBrowserManager(HTTPProvider):
             return self.update_profile(existing["id"], **diff)
         return self._to_info(existing)
 
-    def update_profile(self, instance_id: str, **changes: Any) -> InstanceInfo:
-        """改若干字段。不重启浏览器，多数字段要下次 launch 才生效。
+    def update_profile(
+        self, instance_id: str, *, restart: bool = False, **changes: Any
+    ) -> InstanceInfo:
+        """改若干字段。默认**不重启浏览器**，多数字段要下次 launch 才生效。
+
+            >>> mgr.update_profile(pid, proxy="socks5://new:1080")   # 换代理
+            >>> mgr.update_profile(pid, proxy=CLEAR)                 # 拿掉代理
+            >>> mgr.update_profile(pid, proxy=UNSET)                 # 什么也不做
+            >>> mgr.update_profile(pid, proxy=NEW, restart=True)     # 改完立刻生效
+
+        **裸空串会被拒绝。** ``proxy=""`` 和 ``proxy=None`` 只差一个字符，做的却是
+        相反的事（清空 vs. 保留），从签名上完全看不出来 —— 所以这里不接受它，
+        清空请用 :data:`CLEAR`。
 
         :param instance_id: profile id
-        :param changes: 字段名 → 新值，直接作为 PUT body
-        :returns: 更新后的 :class:`~sleight.core.types.InstanceInfo`
+        :param restart: True 则改完立刻 stop → launch → 等就绪。``proxy`` /
+            ``fingerprint_seed`` 这类字段**不重启就不生效**，而 Manager 只提示不执行 ——
+            改完以为生效了、其实还在用旧代理，是这里最容易出的静默错误。
+            实例本来就没在跑的话只改配置，不会顺手把它拉起来
+        :param changes: 字段名 → 新值。:data:`UNSET` / ``None`` 的字段**不下发**，
+            :data:`CLEAR` 下发成空串
+        :returns: 更新后的 :class:`~sleight.core.types.InstanceInfo`。``restart=True``
+            时是重启**之后**重新查的状态
+        :raises ValueError: 传了裸空串，或所有字段都是 UNSET（那是一次空请求）
         :raises NotFound: 没这个 profile
+        :raises InstanceError: ``restart=True`` 但重启失败
         """
-        r = self._http.put(f"{API}/{instance_id}", json_body=changes)
+        body: dict[str, Any] = {}
+        for key, value in changes.items():
+            if value is UNSET or value is None:
+                continue
+            if value == "":
+                raise ValueError(
+                    f"{key}='' clears the field while {key}=None keeps it — one character "
+                    f"apart, opposite meanings. Pass CLEAR to clear it "
+                    f"(from sleight.providers import CLEAR), or omit it to keep it."
+                )
+            body[key] = "" if value is CLEAR else value
+
+        if not body:
+            raise ValueError(
+                f"update_profile({instance_id!r}) has nothing to change; "
+                "every field was UNSET or None"
+            )
+
+        r = self._http.put(f"{API}/{instance_id}", json_body=body)
         if r.status == 404:
             raise NotFound(f"{self.name}: no such profile {instance_id!r}")
         if not r.ok or not isinstance(r.body, dict):
             raise InstanceError(f"{self.name}: update profile failed ({r.status}) {r.detail}")
+
+        if restart:
+            # 没在跑的实例不顺手拉起来 —— 那是另一个决定，而且要占一份内存
+            if self.status(instance_id) is InstanceStatus.RUNNING:
+                self.recover(instance_id)
+            else:
+                log.debug("%s: %s is not running, nothing to restart", self.name, instance_id)
+            return self._to_info(self.get_profile(instance_id))
         return self._to_info(r.body)
+
+    def prune_profiles(
+        self,
+        *,
+        name_prefix: str | None = None,
+        tags: Iterable[str] | None = None,
+        older_than: timedelta | None = None,
+        dry_run: bool = True,
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        """批量删 profile。**默认只预演，不删。**
+
+            >>> doomed = mgr.prune_profiles(name_prefix="reuters-test-")
+            >>> for p in doomed:
+            ...     print(p["name"])
+            >>> mgr.prune_profiles(name_prefix="reuters-test-", dry_run=False)
+
+        ``dry_run=True`` 是默认值而不是可选项：删 profile 会连带删掉
+        ``user_data_dir``，登录态一起没，**不可逆**。先看清单再动手。
+
+        **不给任何筛选条件会直接报错** —— "删掉全部"必须是明写出来的意图，不能是
+        少传了一个参数的后果。真要清空就给 ``name_prefix=""``。
+
+        :param name_prefix: 名字前缀。``""`` 匹配全部
+        :param tags: 至少带其中一个 tag
+        :param older_than: 创建时间早于"现在减去这段"。Manager 没给
+            ``created_at`` 的 profile 不会被这一条选中
+        :param dry_run: True（默认）只返回会删哪些，不发删除请求
+        :param force: 传给 :meth:`delete_profile` —— running 的也删
+        :returns: 命中的 profile 原始 dict 列表。``dry_run=False`` 时是**已删掉**的那些
+        :raises ValueError: 三个筛选条件一个都没给
+        """
+        if name_prefix is None and tags is None and older_than is None:
+            raise ValueError(
+                "prune_profiles() needs at least one filter; deleting every profile has "
+                'to be spelled out — pass name_prefix="" if that is really what you mean'
+            )
+
+        wanted_tags = frozenset(tags or ())
+        cutoff = None if older_than is None else datetime.now(UTC) - older_than
+        doomed = [
+            p for p in self.list_profiles()
+            if (name_prefix is None or str(p.get("name") or "").startswith(name_prefix))
+            and (not wanted_tags or wanted_tags & {
+                t.get("tag") for t in (p.get("tags") or []) if t.get("tag")
+            })
+            and (cutoff is None or _created_before(p, cutoff))
+        ]
+
+        if dry_run:
+            log.info("%s: prune would delete %d profile(s)", self.name, len(doomed))
+            return doomed
+
+        deleted = []
+        for profile in doomed:
+            try:
+                self.delete_profile(profile["id"], force=force)
+                deleted.append(profile)
+            except (NotFound, InstanceError):
+                # 一个删不掉不该让剩下的都留着 —— 批量清理最怕的就是"删了一半还报错"
+                log.warning("%s: could not delete %s", self.name, profile.get("name"),
+                            exc_info=True)
+        log.info("%s: pruned %d/%d profile(s)", self.name, len(deleted), len(doomed))
+        return deleted
 
     def delete_profile(self, instance_id: str, *, force: bool = False) -> None:
         """删除 profile。

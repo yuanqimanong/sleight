@@ -13,7 +13,17 @@ from typing import ClassVar
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="需要 pip install \"sleight[ui]\"")
-pytest.importorskip("httpx", reason="fastapi 的 TestClient 需要 httpx")
+
+# fastapi 装了 httpx 却没装 = dev 环境坏了，**不能跳过**。跳过的话这个文件里 36 条
+# 测试会一声不响地消失，而构建照样是绿的 —— 换 httpx2 的时候就这么中过一次。
+try:
+    import httpx  # noqa: F401
+except ImportError as exc:                                  # pragma: no cover
+    raise RuntimeError(
+        "fastapi is installed but httpx is not, so fastapi.testclient cannot be used and "
+        "the whole web-API suite would silently vanish. Install the dev extra "
+        "(uv sync --extra dev). Note fastapi's TestClient still needs httpx, not httpx2."
+    ) from exc
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -23,6 +33,8 @@ from sleight.deploy.api.app import Jobs, create_app  # noqa: E402
 from sleight.deploy.engine import DeployResult, Plan  # noqa: E402
 from sleight.deploy.errors import DeployError  # noqa: E402
 from sleight.deploy.preflight import Check, CheckLevel  # noqa: E402
+
+from .conftest import FakeRunner  # noqa: E402
 
 SPEC = spec_mod.DeploySpec(dir="/srv/cbm")
 
@@ -337,24 +349,39 @@ def test_rollback_is_a_job(client, monkeypatch):
     assert StubDeployer.instances[-1].calls == ["rollback"]
 
 
-def test_destroy_keeps_data_by_default(client, monkeypatch):
-    seen: list[bool] = []
+def _watch_destroy(monkeypatch) -> list[tuple[bool, bool]]:
+    """记下每次 destroy 收到的 (purge_data, purge_image)。"""
+    seen: list[tuple[bool, bool]] = []
     monkeypatch.setattr(
         StubDeployer, "destroy",
-        lambda self, purge_data=False: seen.append(purge_data), raising=False,
+        lambda self, purge_data=False, purge_image=False: seen.append(
+            (purge_data, purge_image)
+        ),
+        raising=False,
     )
+    return seen
+
+
+def test_destroy_keeps_data_and_image_by_default(client, monkeypatch):
+    seen = _watch_destroy(monkeypatch)
     job = wait_job(client, client.post("/api/hosts/local/destroy", json={}).json()["job"])
     assert job["status"] == "ok"
-    assert seen == [False]
+    assert seen == [(False, False)]
+
+
+def test_destroying_the_image_does_not_need_the_ref_typed_out(client, monkeypatch):
+    """删镜像不是不可逆的 —— 重新 pull 就回来了，不该跟删 data/ 一样难。"""
+    seen = _watch_destroy(monkeypatch)
+    job = wait_job(client, client.post(
+        "/api/hosts/local/destroy", json={"purge_image": True}
+    ).json()["job"])
+    assert job["status"] == "ok"
+    assert seen == [(False, True)]
 
 
 def test_purging_data_needs_the_ref_typed_out(client, monkeypatch):
     """一个能被误点的按钮不该能删掉全部登录态。"""
-    seen: list[bool] = []
-    monkeypatch.setattr(
-        StubDeployer, "destroy",
-        lambda self, purge_data=False: seen.append(purge_data), raising=False,
-    )
+    seen = _watch_destroy(monkeypatch)
     refused = client.post("/api/hosts/local/destroy", json={"purge_data": True})
     assert refused.status_code == 400
     assert "原样打一遍" in refused.json()["detail"]
@@ -367,9 +394,10 @@ def test_purging_data_needs_the_ref_typed_out(client, monkeypatch):
     assert seen == [], "确认没通过就一次都不该执行"
 
     ok = client.post("/api/hosts/local/destroy",
-                     json={"purge_data": True, "confirm": "local/default"})
+                     json={"purge_data": True, "purge_image": True,
+                           "confirm": "local/default"})
     assert wait_job(client, ok.json()["job"])["status"] == "ok"
-    assert seen == [True]
+    assert seen == [(True, True)]
 
 
 def test_deleting_a_deployment_leaves_the_target_alone(client):
@@ -500,3 +528,62 @@ def test_the_ui_ships_a_theme_toggle():
     assert 'data-theme="dark"' in source
     assert "prefers-color-scheme: dark" in source
     assert "sleight_theme" in source
+
+
+def test_the_probe_reports_memory_the_same_way_preflight_does(client, monkeypatch):
+    """同一台机两个界面报不同的数字，使用者只会怀疑工具。
+
+    ``free -g`` 向下取整 —— 3.8 GB 的机器在界面上显示成 "3 GB"，比 preflight 少报
+    将近 1 GB。两边共用 parse_mem_total_kb 才不会再飘。
+    """
+    runner = FakeRunner(
+        files={"/proc/meminfo": "MemTotal:        3999504 kB\nMemFree:  100 kB\n"},
+        replies={
+            "uname": (0, "Linux x86_64"),
+            "docker version": (0, "28.5.2"),
+            "docker compose version": (0, "2.40.3"),
+            "id -un": (0, "kali"),
+        },
+    )
+    monkeypatch.setattr(app_mod.Host, "runner", lambda self, **kw: runner)
+
+    body = client.post("/api/probe", json={"ssh": "u@h"}).json()
+
+    assert not any("free" in " ".join(c) for c in runner.commands), "free -g 会向下取整"
+    mem = next(s for s in body["steps"] if s["name"] == "内存")
+    assert mem["detail"] == "3.8 GB", mem
+
+
+def test_deploying_with_edited_params_updates_the_record(client):
+    """界面上「部署」那页是当作"改这个部署的参数"呈现的 —— 改了就得存回去。
+
+    真机上撞过：把目录改成 /home/me/x 点部署，容器确实去了新目录，但记录还写着旧的，
+    于是取 token、看实例、销毁全去错地方，真正的部署变成谁也不认识的孤儿。
+    """
+    client.post("/api/hosts", json={
+        "name": "hk", "ssh": "u@h", "deployment": "default",
+        "deploy": {"dir": "/srv/old", "port": 9000},
+    })
+    job = client.post("/api/hosts/hk/deploy",
+                      json={"spec": {"dir": "/srv/new", "port": 9100}}).json()["job"]
+    assert wait_job(client, job)["status"] == "ok"
+
+    stored = next(d for h in client.get("/api/hosts").json()
+                  for d in h["deployments"] if d["ref"] == "hk/default")
+    assert stored["spec"]["dir"] == "/srv/new", "记录还指着旧目录"
+    assert stored["spec"]["port"] == 9100
+
+
+def test_deploying_without_edits_leaves_the_record_alone(client):
+    """没改参数就别写库 —— 免得每次部署都无谓地动一次记录。"""
+    client.post("/api/hosts", json={
+        "name": "hk", "ssh": "u@h", "deployment": "default",
+        "deploy": {"dir": "/srv/old", "port": 9000},
+    })
+    before = client.get("/api/hosts").json()
+    assert wait_job(client, client.post("/api/hosts/hk/deploy",
+                                        json={}).json()["job"])["status"] == "ok"
+    after = next(d for h in client.get("/api/hosts").json()
+                 for d in h["deployments"] if d["ref"] == "hk/default")
+    was = next(d for h in before for d in h["deployments"] if d["ref"] == "hk/default")
+    assert after["spec"] == was["spec"]

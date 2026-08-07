@@ -85,6 +85,23 @@ class HumanProfile:
     """双击的两下之间。**不能复用 ``dwell``** —— 那是按住的时长，两下之间是另一个分布，
     而且必须落在浏览器的双击判定窗口内（Chrome 约 500 ms）。"""
 
+    # —— 拖拽 ——
+    drag_settle: tuple[float, float] = (0.080, 0.240)
+    """拖到位之后、松手之前的迟滞。
+
+    人放手前会先停一下确认位置。滑块验证码的风控明确盯这一段 —— **到位即松手**是
+    机器最稳定的特征之一。和 ``dwell`` 是两回事：``dwell`` 挂在按下之后、轨迹开始
+    之前，这个挂在轨迹结束之后、抬起之前。
+    """
+
+    drag_overshoot_threshold: float = 60.0
+    """px。拖拽单列的过冲阈值，语义同 ``overshoot_threshold``。
+
+    指针移动那档是 500 px —— 滑块总共才一两百像素宽，套那个阈值等于**永不过冲**。
+    而人拖滑块几乎总是冲过头再拉回来；一条严格单调、终点恰好就是极值的轨迹，在
+    滑块场景里反而是异常值。
+    """
+
     # —— 打字 ——
     key_dwell: tuple[float, float] = (0.060, 0.120)
     """按下到抬起。独立于间隔的第二维特征，不要恒为 0。"""
@@ -113,8 +130,8 @@ class HumanProfile:
         return dataclasses.replace(self, **kw)
 
     def __post_init__(self) -> None:
-        for name in ("step_delay", "reaction", "dwell", "key_dwell", "think_pause",
-                     "scroll_delay", "scroll_step", "think_every"):
+        for name in ("step_delay", "reaction", "dwell", "drag_settle", "key_dwell",
+                     "think_pause", "scroll_delay", "scroll_step", "think_every"):
             lo, hi = getattr(self, name)
             if lo > hi:
                 raise ValueError(f"HumanProfile.{name}: low bound {lo} exceeds high bound {hi}")
@@ -131,6 +148,7 @@ FAST = HumanProfile(
     bow=0.10,
     fitts_b=0.05,
     overshoot=0.3,
+    drag_settle=(0.050, 0.140),
     key_dwell=(0.040, 0.075),
     typing_scale=0.70,
     typing_spread=0.60,
@@ -150,7 +168,9 @@ CAREFUL = HumanProfile(
     fitts_b=0.16,
     overshoot=1.4,
     overshoot_threshold=320.0,
+    drag_overshoot_threshold=40.0,
     reaction=(0.120, 0.320),
+    drag_settle=(0.150, 0.450),
     key_dwell=(0.070, 0.150),
     typing_scale=1.35,
     typing_spread=1.30,

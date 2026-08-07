@@ -92,12 +92,41 @@ class Element:
         return self._eval("return el.innerText;") or ""
 
     def attr(self, name: str) -> str | None:
-        """读一个 HTML 属性。
+        """读一个 HTML **属性**。
+
+        ⚠️ 属性不是 property。``attr("value")`` 拿到的是 HTML 里写死的那个初值，
+        **不随用户输入变化** —— 想校验"刚才 type 进去的内容对不对"要用 :meth:`value`。
 
         :param name: 属性名，会经 ``json.dumps`` 转义后拼进 JS
         :returns: 属性值；属性不存在或元素不在了返回 ``None``
         """
         return self._eval(f"return el.getAttribute({json.dumps(name)});")
+
+    def value(self) -> str | None:
+        """读表单控件的当前值（DOM **property**，不是 HTML 属性）。
+
+        :returns: 当前值；元素不在了、或它没有 ``value`` 时返回 ``None``
+        """
+        return self._eval("return 'value' in el ? String(el.value) : null;")
+
+    def screenshot(self, path: str | None = None) -> bytes:
+        """只截这个元素，PNG。验证码图片、滑块背景图用它。
+
+        :param path: 给了就同时把字节写到这个文件
+        :returns: PNG 字节
+        :raises ElementError: 元素不存在或宽高为 0
+        """
+        return self._session.screenshot(path, target=self)
+
+    def select_option(self, *, value: str | None = None, label: str | None = None) -> str:
+        """选中这个 ``<select>`` 里的一项。见
+        :meth:`Session.select_option() <sleight.core.session.Session.select_option>`。"""
+        return self._session.select_option(self, value=value, label=label)
+
+    def upload_file(self, *paths: str) -> None:
+        """给这个 ``<input type=file>`` 塞文件。路径是**浏览器那台机器**上的。见
+        :meth:`Session.upload_file() <sleight.core.session.Session.upload_file>`。"""
+        self._session.upload_file(self, *paths)
 
     def object_id(self) -> str:
         """拿一个 CDP ``Runtime.RemoteObject`` 句柄，给 ``DOM.*`` 命令用。

@@ -6,7 +6,9 @@ from random import Random
 
 import pytest
 
+from sleight.core.element import Element
 from sleight.core.errors import ElementError
+from sleight.core.human import engine
 from sleight.core.human.presets import CAREFUL, DEFAULT, FAST
 from sleight.core.input import InputDriver, resolve_profile
 from sleight.core.keymap import MOD_CTRL, MOD_SHIFT
@@ -426,3 +428,251 @@ def test_scroll_gives_up_when_nothing_moves(session: FakeSession):
         driver(session, default_human=True).scroll_into_view("#deep")
     wheels = [p for _, p in session.transport.sent if p.get("type") == "mouseWheel"]
     assert len(wheels) < 40, f"blasted {len(wheels)} wheel events at an unscrollable element"
+
+
+# --------------------------------------------------------------------------- #
+# 拖拽
+# --------------------------------------------------------------------------- #
+
+
+def mouse(session: FakeSession) -> list[dict]:
+    return [p for m, p in session.transport.sent if m == "Input.dispatchMouseEvent"]
+
+
+def drag_path(session: FakeSession) -> list[dict]:
+    """按住键的那段轨迹 —— buttons 非零的 mouseMoved。"""
+    return [p for p in mouse(session) if p["type"] == "mouseMoved" and p["buttons"]]
+
+
+def test_drag_needs_exactly_one_destination(session: FakeSession):
+    d = driver(session)
+    with pytest.raises(ValueError, match="exactly one"):
+        d.drag("#h")
+    with pytest.raises(ValueError, match="exactly one"):
+        d.drag("#h", to="#t", by=(10, 0))
+
+
+def test_drag_holds_the_button_down_for_the_whole_haul(session: FakeSession):
+    """拖拽段的 buttons 掩码一路非零。
+
+    掩码回 0 的移动就是 hover —— 页面 handler 一句 ``e.buttons`` 就知道键没按着，
+    整条轨迹白发。
+    """
+    driver(session, default_human=True).drag("#handle", by=(200, 0))
+
+    events = mouse(session)
+    press = next(i for i, p in enumerate(events) if p["type"] == "mousePressed")
+    release = next(i for i, p in enumerate(events) if p["type"] == "mouseReleased")
+    haul = events[press + 1 : release]
+
+    assert haul, "no movement between press and release — that is a click, not a drag"
+    assert all(p["type"] == "mouseMoved" for p in haul)
+    assert all(p["buttons"] == 1 for p in haul), "the button went up mid-haul"
+
+
+def test_drag_by_offset_lands_where_asked(session: FakeSession):
+    d = driver(session, default_human=True)
+    grabbed = session.box.center
+    landed = d.drag("#handle", by=(200, -30))
+
+    press = next(p for p in mouse(session) if p["type"] == "mousePressed")
+    assert landed == Point(press["x"] + 200, press["y"] - 30)
+    assert abs(press["x"] - grabbed.x) <= session.box.w, "grabbed nowhere near the element"
+
+
+def test_drag_to_an_element_ends_on_it(session: FakeSession):
+    target = Element(session, "#drop")
+    landed = driver(session, default_human=True).drag("#handle", to=target)
+    box = session.box
+    assert box.x <= landed.x <= box.x + box.w
+    assert box.y <= landed.y <= box.y + box.h
+
+
+def test_drag_pauses_before_letting_go(session: FakeSession, monkeypatch):
+    """到位即松手是机器最稳定的特征之一，滑块风控盯的就是这一段。"""
+    slept: list[float] = []
+    monkeypatch.setattr("sleight.core.input.time.sleep", slept.append)
+
+    driver(session, default_human=DEFAULT).drag("#handle", by=(200, 0))
+
+    lo, hi = DEFAULT.drag_settle
+    assert any(lo <= s <= hi + DEFAULT.step_delay[1] for s in slept), (
+        f"no pause in the drag_settle range before the release; slept {slept}"
+    )
+
+
+def test_drag_settle_is_not_a_repeated_move_event(session: FakeSession):
+    """迟滞挂在最后一个轨迹点的尾巴上，不能补一条零位移的 mouseMoved 来承载它。
+
+    补出来的那条位置**恒等于**落点，而 mouse_path 刚刚才把连续重复点去掉 ——
+    一行 ``prev.x === cur.x && prev.y === cur.y`` 就能把整个库挑出来。
+    """
+    driver(session, default_human=DEFAULT).drag("#handle", by=(200, 0))
+    haul = drag_path(session)
+    assert (haul[-1]["x"], haul[-1]["y"]) != (haul[-2]["x"], haul[-2]["y"])
+
+
+def test_engine_drag_events_hang_the_settle_on_the_last_move():
+    events, _ = engine.drag_events(
+        Point(10, 10), Box(100, 100, 40, 20), Box(600, 100, 40, 20),
+        rng=Random(3), profile=DEFAULT,
+    )
+    moves = [e for e in events if e.params.get("type") == "mouseMoved" and e.params["buttons"]]
+    assert moves[-1].sleep_after >= DEFAULT.drag_settle[0]
+    assert events[-1].params["type"] == "mouseReleased"
+
+
+def test_drag_refuses_an_offscreen_drop_target_instead_of_scrolling(session: FakeSession):
+    """按住键滚页面会让已经抓在手里的 box 失效，而且没法还原成人类动作。"""
+    d = driver(session, default_human=True)
+    target = Element(session, "#drop")
+    offscreen(session)                       # 现在两端都在视口外了
+    with pytest.raises(ElementError, match="outside the viewport"):
+        d.drag(Point(100, 100), to=target)
+    assert not [p for p in mouse(session) if p["type"] == "mousePressed"], (
+        "pressed the button and then failed — that leaves the mouse stuck down"
+    )
+
+
+def test_drag_overshoots_at_slider_distances():
+    """指针那档 500 px 的阈值套到滑块上等于永不过冲。
+
+    过冲是概率事件，所以这里统计 12 个种子 —— 单个种子的绿灯说明不了阈值改没改对。
+    """
+    overshot = 0
+    for seed in range(12):
+        s = FakeSession(box=Box(100.0, 300.0, 30.0, 30.0))
+        InputDriver(s, default_human=CAREFUL, rng=Random(seed)).drag("#handle", by=(180, 0))
+        xs = [p["x"] for p in drag_path(s)]
+        overshot += max(xs) > xs[-1]
+    assert overshot >= 9, (
+        f"only {overshot}/12 slider drags overshot — the pointer-grade threshold is still "
+        "in effect, and a strictly monotonic haul is itself the tell"
+    )
+
+
+def test_drag_hit_checks_the_source_but_not_the_destination(session: FakeSession):
+    """被拖的元素通常就挂在光标底下，对终点做命中校验只会误报。"""
+    driver(session, default_human=True).drag("#handle", to=Element(session, "#drop"))
+    assert session.hit_tests == 2, f"{session.hit_tests} hit tests; expected exactly the 2 on grab"
+
+
+# —— HTML5 原生拖放 ——
+
+DND = {"items": [{"mimeType": "text/plain", "data": "card-7"}], "dragOperationsMask": 1}
+
+
+def dnd(session: FakeSession) -> list[dict]:
+    return [p for m, p in session.transport.sent if m == "Input.dispatchDragEvent"]
+
+
+def test_drag_and_drop_translates_the_trajectory_when_the_browser_intercepts(
+    session: FakeSession,
+):
+    """原生拖放期间页面收到的是 dragover，不是 mousemove —— 这里是翻译，不是追加。"""
+    session.drag_data = DND
+    driver(session, default_human=True).drag_and_drop("#card", "#column")
+
+    types = [p["type"] for p in dnd(session)]
+    assert types[0] == "dragEnter", "no dragEnter — drop zones that light up on it stay dark"
+    assert types[-1] == "drop"
+    assert types.count("dragOver") >= 1
+    assert all(p["data"] == DND for p in dnd(session)), "dragIntercepted data must be echoed back"
+
+    # 起步段之后不该再有 mouseMoved：原生拖放期间浏览器发的就是 drag 事件。两套并发
+    # 会让同时监听 mousemove 和 dragover 的实现看到双倍的移动
+    order = [
+        m for m, p in session.transport.sent
+        if m == "Input.dispatchDragEvent"
+        or (m == "Input.dispatchMouseEvent" and p["type"] == "mouseMoved" and p["buttons"])
+    ]
+    first_drag = order.index("Input.dispatchDragEvent")
+    assert "Input.dispatchMouseEvent" not in order[first_drag:], (
+        "kept sending held mouseMoved events after the browser took over the drag"
+    )
+    assert first_drag <= 6, f"kickoff took {first_drag} moves; it only needs to clear ~5 px"
+
+
+def test_drag_and_drop_falls_back_to_mouse_events_for_js_implementations(session: FakeSession):
+    """没被拦截 = 页面是自己用 mousemove 实现的拖动。继续发鼠标事件就行。"""
+    session.drag_data = None                 # 不是原生可拖元素
+    driver(session, default_human=True).drag_and_drop("#card", "#column")
+
+    assert not dnd(session), "dispatched drag events at an element the browser never intercepted"
+    assert drag_path(session), "no mouse trajectory either — the drag did nothing at all"
+    assert [p for p in mouse(session) if p["type"] == "mouseReleased"]
+
+
+def test_drag_and_drop_always_turns_interception_back_off(session: FakeSession):
+    session.drag_data = DND
+    driver(session, default_human=True).drag_and_drop("#card", "#column")
+    assert session.intercepting is False, "left setInterceptDrags on for the whole session"
+
+
+def test_interception_is_turned_off_even_when_the_drag_blows_up(session: FakeSession):
+    session.drag_data = DND
+    session._hits = False                    # 起点被遮挡
+    with pytest.raises(ElementError):
+        driver(session, default_human=True).drag_and_drop("#card", "#column")
+    assert session.intercepting is False
+
+
+def test_an_old_chrome_without_setinterceptdrags_degrades_to_mouse_only(session: FakeSession):
+    session.intercept_drags = False          # 命令不存在
+    driver(session, default_human=True).drag_and_drop("#card", "#column")
+    assert drag_path(session), "gave up entirely instead of falling back to mouse events"
+
+
+def test_native_true_releases_the_button_before_complaining(session: FakeSession):
+    """带着按下状态抛异常的话，之后每一次点击都会变成拖拽。"""
+    session.drag_data = None                 # 并非原生可拖
+    with pytest.raises(ElementError, match="not natively draggable"):
+        driver(session, default_human=True).drag_and_drop("#card", "#column", native=True)
+
+    types = [p["type"] for p in mouse(session)]
+    assert types.count("mousePressed") == types.count("mouseReleased") == 1
+
+
+def test_native_false_never_touches_the_drag_domain(session: FakeSession):
+    session.drag_data = DND
+    driver(session, default_human=True).drag_and_drop("#card", "#column", native=False)
+    assert not dnd(session)
+    assert "Input.setInterceptDrags" not in [m for m, _ in session.transport.called]
+
+
+def test_held_moves_carry_button_not_just_the_buttons_mask():
+    """真机上验出来的：只给 buttons 掩码，HTML5 原生拖放**一声不吭地不启动**。
+
+    页面 JS 读的是 ``e.buttons``，所以自制滑块照常工作；而浏览器自己的拖拽控制器
+    认的是 ``button`` —— 少了它 dragstart 不触发、``Input.dragIntercepted`` 永远不来，
+    表现是"一切正常但什么也没发生"。Chrome 146 上实测：同一段轨迹加上
+    ``button='left'`` 才有 dragstart。
+    """
+    held, _ = engine.move_events(
+        Point(10, 10), Point(300, 10), rng=Random(1), profile=DEFAULT, held="left"
+    )
+    assert held, "no trajectory"
+    assert all(e.params["button"] == "left" for e in held)
+    assert all(e.params["buttons"] == 1 for e in held)
+
+    # 直通模式也一样 —— 它只发一条，漏了同样不启动
+    passthrough, _ = engine.move_events(
+        Point(10, 10), Point(300, 10), rng=Random(1), profile=None, held="left"
+    )
+    assert passthrough[0].params["button"] == "left"
+
+
+def test_plain_moves_do_not_claim_a_button():
+    """普通 hover 带上 button 就是在谎报状态。"""
+    moves, _ = engine.move_events(
+        Point(10, 10), Point(300, 10), rng=Random(1), profile=DEFAULT
+    )
+    assert all("button" not in e.params for e in moves)
+    assert all(e.params["buttons"] == 0 for e in moves)
+
+
+def test_the_driver_sends_button_on_the_whole_haul(session: FakeSession):
+    driver(session, default_human=True).drag("#handle", by=(200, 0))
+    assert all(p.get("button") == "left" for p in drag_path(session)), (
+        "a held move without button= will not start a native HTML5 drag"
+    )

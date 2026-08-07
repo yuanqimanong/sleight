@@ -17,6 +17,7 @@ from typing import ClassVar
 
 __all__ = [
     "Box",
+    "ClearReport",
     "Condition",
     "DomReady",
     "Endpoint",
@@ -27,8 +28,60 @@ __all__ = [
     "NetworkIdle",
     "Point",
     "Selector",
+    "StorageType",
     "Text",
 ]
+
+
+class StorageType(StrEnum):
+    """``Storage.clearDataForOrigin`` 认的存储类型。
+
+    做成枚举而不是收裸字符串：CDP 那边是**逗号分隔的字符串**，拼错一个词不报错、
+    静默不生效 —— 你以为清干净了，其实什么都没动。
+    """
+
+    COOKIES = "cookies"
+    LOCAL_STORAGE = "local_storage"
+    INDEXEDDB = "indexeddb"
+    CACHE_STORAGE = "cache_storage"
+    SERVICE_WORKERS = "service_workers"
+    WEBSQL = "websql"
+    FILE_SYSTEMS = "file_systems"
+    SHADER_CACHE = "shader_cache"
+    INTEREST_GROUPS = "interest_groups"
+    SHARED_STORAGE = "shared_storage"
+    STORAGE_BUCKETS = "storage_buckets"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class ClearReport:
+    """:meth:`Session.clear_site_data() <sleight.core.session.Session.clear_site_data>`
+    清掉了什么。
+
+    存在的理由只有一个：排查时「datadome 这个 cookie 到底清没清掉」比什么都值钱，
+    而 CDP 的清理命令**什么都不返回**。
+    """
+
+    origin: str
+    """实际清理的 origin，已经归一化过（去掉 path / query）。"""
+
+    types: tuple[StorageType, ...]
+    """这次清了哪几类。"""
+
+    cookies: tuple[str, ...] | None
+    """清掉的 cookie 名字。``None`` 表示**没测量**（Network domain 没开），
+    和 ``()``「一个都没有」是两回事。"""
+
+    usage_before: int
+    """清理前该 origin 占用的字节数。"""
+
+    usage_after: int
+    """清理后。仍然不为 0 不一定是失败 —— 有些类型不在 ``types`` 里。"""
+
+    def __bool__(self) -> bool:
+        """有没有真的清掉东西。空清理是最常见的"看起来成功了"。"""
+        return bool(self.cookies) or self.usage_after < self.usage_before
 
 @dataclass(frozen=True, slots=True)
 class Point:

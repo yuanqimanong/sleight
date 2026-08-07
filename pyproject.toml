@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sleight"
-version = "0.3.0"
+version = "0.4.0"
 description = "Drive any CDP browser like a human — trajectories, typing rhythm, instance leasing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,9 +31,13 @@ ui = ["fastapi>=0.115", "uvicorn>=0.30"]
 # redis / fakeredis 进 dev：不装的话 tests/test_lease_redis.py 连 import 都过不去。
 # fakeredis[lua] 带真 Lua 解释器，CAS 脚本因此在 CI 里是被真正执行的，不是走替身。
 # httpx 是 fastapi 的 TestClient 要的，只在测试里用。
+# **不要换成 httpx2**：starlette 1.4 弃用了 httpx 那条路（跑测试会看到一条
+# StarletteDeprecationWarning），但 fastapi 的 TestClient 至今仍 import httpx ——
+# 换过去的后果是 test_deploy_api.py 整个 36 条**静默跳过**，构建照样是绿的。
 dev = [
     "pytest>=8",
-    "ruff>=0.6",
+    # 下界钉在 0.16：更早的版本规则集不同，本地绿、CI 红，这个我们真踩过
+    "ruff>=0.16",
     "redis>=5",
     "fakeredis[lua]>=2.26",
     "fastapi>=0.115",

@@ -464,6 +464,39 @@ def test_purge_that_cannot_delete_at_all_says_what_to_run_by_hand():
         dep.destroy(purge_data=True)
 
 
+def test_the_image_survives_unless_asked_for():
+    """删镜像的代价是下次部署要重新拉几百 MB —— 不能是默认行为。"""
+    dep, runner = deployed()
+    dep.destroy(purge_data=True)
+    assert not runner.ran("docker", "image", "rm")
+
+
+def test_purge_image_removes_it():
+    dep, runner = deployed()
+    dep.destroy(purge_image=True)
+    assert runner.ran("docker", "image", "rm", SPEC.image)
+
+
+def test_purge_image_never_forces():
+    """强删会把还在跑的那个部署的镜像层抽走，症状要等它下次重启才出现。"""
+    dep, runner = deployed()
+    dep.destroy(purge_image=True)
+    assert not any("-f" in c or "--force" in c
+                   for c in runner.find("docker", "image", "rm"))
+
+
+def test_an_image_still_in_use_is_reported_not_raised():
+    """同机别的部署在用它 —— 那不是这次销毁失败。"""
+    said: list[str] = []
+    dep, runner = deployed(on_progress=said.append)
+    runner.replies["docker image rm"] = (
+        1, "Error response from daemon: conflict: unable to remove repository reference"
+    )
+    dep.destroy(purge_image=True)                    # 不抛
+    assert any("镜像没删掉" in line for line in said)
+    assert any("docker image rm -f" in line for line in said)
+
+
 def test_destroy_without_a_compose_file_still_removes_the_container():
     dep, runner = make()
     dep.destroy()

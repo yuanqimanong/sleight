@@ -12,13 +12,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import time
 from random import Random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .element import Element
-from .errors import ElementError
+from .errors import ElementError, ProtocolError
 from .human import engine
 from .human.presets import DEFAULT, HumanProfile
 from .types import Box, Point
@@ -41,6 +43,31 @@ HumanSwitch = bool | HumanProfile | None
 _SCROLL_TARGET_RATIO = 0.4
 #: 滚动重试上限。没有进展会提前退出，这只是兜底
 _SCROLL_ATTEMPTS = 8
+
+#: 拖拽"起步段"的最小位移，px。原生拖放要光标先走出这么远，浏览器的拖拽控制器才认为
+#: 拖动开始。Chrome 自己的阈值是几像素，取 5 有余量，又不至于一步跨到终点
+_DRAG_KICKOFF_PX = 5
+#: 起步段发完之后，再花这么久收一次包看有没有 ``Input.dragIntercepted``，秒
+_DRAG_INTERCEPT_WINDOW = 0.25
+
+
+def _split_kickoff(
+    origin: Point, moves: list[engine.Event]
+) -> tuple[list[engine.Event], list[engine.Event]]:
+    """把拖拽轨迹切成"起步段"和"剩下的"。
+
+    切一刀是为了**只生成一次轨迹**就同时办成两件事：先走够 :data:`_DRAG_KICKOFF_PX`
+    让浏览器表态（原生拖放 or 普通鼠标拖动），再按表态的结果决定剩下那段用哪种事件
+    发出去。分两次生成轨迹的话，中间那个接缝处会出现一个速度不连续点。
+
+    :param origin: 按下的位置，位移从它算起
+    :param moves: :func:`~sleight.core.human.engine.move_events` 的产出
+    :returns: ``(起步段, 剩下的)``。整条轨迹都不到阈值时，全部算起步段
+    """
+    for i, ev in enumerate(moves):
+        if math.dist((origin.x, origin.y), (ev.params["x"], ev.params["y"])) >= _DRAG_KICKOFF_PX:
+            return moves[: i + 1], moves[i + 1 :]
+    return moves, []
 
 
 def resolve_profile(
@@ -246,6 +273,223 @@ class InputDriver:
                 lead_delay=self._pre_press_delay(nth, profile),
             )
         return landing
+
+    # ------------------------------------------------------------------ #
+    # 拖拽
+    # ------------------------------------------------------------------ #
+
+    def drag(
+        self,
+        target: Aimable,
+        *,
+        to: Aimable | None = None,
+        by: tuple[int, int] | None = None,
+        human: HumanSwitch = None,
+        button: str = "left",
+    ) -> Point:
+        """按住 ``target`` 拖到别处。**纯鼠标事件** —— 滑块、画布、地图平移用这个。
+
+        HTML5 的 ``draggable=true`` 收不到纯鼠标事件（原生拖放由浏览器自己的拖拽控制器
+        驱动，不是从 mousemove 派生的），那种要用 :meth:`drag_and_drop`。
+
+        两端必须同时在视口里：按下之后 sleight **不会**滚页面 —— 滚动会让已经抓在手里
+        的 box 失效，也没法还原成一次连贯的人类动作。
+
+        :param target: 抓哪。选择器 / Element / Point / Box
+        :param to: 拖到哪，形态同上。与 ``by`` 二选一
+        :param by: ``(dx, dy)``，从实际抓取点算的相对位移。滑块场景用它
+        :param human: 三态开关，见 :func:`resolve_profile`
+        :param button: 按住哪个键拖
+        :returns: 松手的坐标
+        :raises ValueError: ``to`` / ``by`` 一个没给，或两个都给了
+        :raises ElementError: 起点没命中、被遮挡，或终点元素不在视口里
+        """
+        if (to is None) == (by is None):
+            raise ValueError("drag() takes exactly one of to= / by=")
+
+        profile = self._profile(human)
+        # 终点先解析：它可能因为不在视口而报错，而那时候按键还没按下去。反过来的话
+        # 异常会把鼠标键留在按下状态，后面每一次点击都变成拖拽
+        geometry, element = self._target_box(target, human=profile)
+        dest = None if to is None else self._drop_geometry(to)
+
+        grab_at = self._grab(geometry, element, profile=profile, button=button)
+        if dest is None:
+            assert by is not None
+            dest = Point(grab_at.x + by[0], grab_at.y + by[1])
+
+        moves, release_at = engine.move_events(
+            grab_at, dest, rng=self._rng, profile=profile, held=button,
+            viewport=self._session.viewport(),
+        )
+        self._run(engine.with_trailing_delay(moves, engine.settle_delay(self._rng, profile)))
+        self._cursor = release_at
+        self._run(engine.release_events(release_at, button=button))
+        return release_at
+
+    def drag_and_drop(
+        self,
+        source: Aimable,
+        target: Aimable,
+        *,
+        human: HumanSwitch = None,
+        button: str = "left",
+        native: bool | None = None,
+    ) -> Point:
+        """把 ``source`` 拖到 ``target`` 上，HTML5 原生拖放与纯鼠标实现都吃。
+
+        默认自适应：打开 ``Input.setInterceptDrags`` 之后照常按下、起步，然后看浏览器
+        表态 —— 抛了 ``Input.dragIntercepted`` 就说明这是个原生可拖元素，剩下的轨迹翻
+        成 ``dragEnter`` / ``dragOver`` / ``drop``（原生拖放期间页面收到的本来就是这些，
+        不是 ``mousemove``）；没抛就说明是 JS 自己实现的拖动，继续发鼠标事件。
+
+        这个分支不是保守起见 —— 两种实现对**对方**的事件完全不响应，猜错了的表现是
+        "一切正常但什么也没发生"。
+
+        :param source: 拖谁
+        :param target: 拖到哪
+        :param human: 三态开关，见 :func:`resolve_profile`
+        :param button: 按住哪个键拖
+        :param native: ``None`` 自适应（默认）；``True`` 要求必须是原生可拖元素，不是
+            就报错；``False`` 只发鼠标事件，等价于 :meth:`drag`
+        :returns: 松手的坐标
+        :raises ElementError: 起点没命中、终点不在视口里，或 ``native=True`` 但元素
+            并不是原生可拖的
+        """
+        profile = self._profile(human)
+        geometry, element = self._target_box(source, human=profile)
+        dest = self._drop_geometry(target)
+
+        intercepting = native is not False and self._enable_drag_intercept()
+        try:
+            grab_at = self._grab(geometry, element, profile=profile, button=button)
+            moves, release_at = engine.move_events(
+                grab_at, dest, rng=self._rng, profile=profile, held=button,
+                viewport=self._session.viewport(),
+            )
+            head, tail = _split_kickoff(grab_at, moves)
+
+            data = self._kickoff_native(head) if intercepting else None
+            if not intercepting:
+                self._run(head)
+
+            # 终点**不做**命中校验：拖拽中的实现普遍把被拖元素挂在光标底下（原生的
+            # drag image、或 position:fixed 的克隆），elementFromPoint 拿到的是它而不是
+            # 放置区。在这里校验只会对正确的拖拽误报。
+            haul = engine.with_trailing_delay(
+                tail or head, engine.settle_delay(self._rng, profile)
+            )
+            if data is not None:
+                self._run(engine.drop_events(haul, data))
+            elif native:
+                # 键已经按下去了。先松手再报错 —— 带着按下状态抛异常的话，之后每一次
+                # 点击都会变成拖拽，而错误信息里完全看不出这一点
+                stuck = Point(head[-1].params["x"], head[-1].params["y"])
+                self._cursor = stuck
+                self._run(engine.release_events(stuck, button=button))
+                raise ElementError(
+                    f"{element!r} is not natively draggable — pressing and moving it did "
+                    "not start a browser drag, so dragEnter/dragOver/drop would go "
+                    "nowhere. Use drag()/drag_and_drop(native=None) for JS-implemented "
+                    "drag handles."
+                )
+            else:
+                self._run(haul)
+
+            self._cursor = release_at
+            self._run(engine.release_events(release_at, button=button))
+            return release_at
+        finally:
+            if intercepting:
+                with contextlib.suppress(ProtocolError):
+                    self._session.call("Input.setInterceptDrags", {"enabled": False})
+
+    def _grab(
+        self,
+        geometry: Box | Point,
+        element: Element | None,
+        *,
+        profile: HumanProfile | None,
+        button: str,
+    ) -> Point:
+        """移动到起点 → 两次命中校验 → 按下。返回真正抓在哪。
+
+        校验两次的理由和 :meth:`click` 完全一样，见那里的注释。
+
+        :param geometry: 已解析的起点几何
+        :param element: 对应元素，裸坐标时为 ``None``（没得校验）
+        :param profile: **已解析**的 profile
+        :param button: 按哪个键
+        :returns: 抓取点
+        """
+        events, landing = engine.move_events(
+            self.cursor, geometry, rng=self._rng, profile=profile,
+            viewport=self._session.viewport(),
+        )
+        if element is not None:
+            element.require_hit(landing.x, landing.y, when="before moving there")
+        self._run(events)
+        self._cursor = landing
+        if element is not None:
+            element.require_hit(landing.x, landing.y, when="after the pointer arrived")
+
+        self._run(
+            engine.press_events(landing, button=button, rng=self._rng, profile=profile),
+            lead_delay=self._pre_press_delay(1, profile),
+        )
+        return landing
+
+    def _drop_geometry(self, dest: Aimable) -> Box | Point:
+        """拖拽终点的几何。**不滚动** —— 不在视口里直接报错。
+
+        :param dest: 选择器 / Element / Point / Box
+        :returns: 几何
+        :raises ElementError: 元素不存在，或不在视口里
+        """
+        if isinstance(dest, (Point, Box)):
+            return dest
+        element = self._session.require(dest)
+        if not element.in_viewport():
+            raise ElementError(
+                f"drop target {element!r} is outside the viewport, and sleight will not "
+                "scroll while a mouse button is held: that invalidates the box already "
+                "grabbed and yields a trajectory no hand would produce. Bring both ends "
+                "into view first (scroll_into_view), then drag."
+            )
+        return element.require_box()
+
+    def _enable_drag_intercept(self) -> bool:
+        """打开原生拖放拦截。
+
+        :returns: 打开了没有。老版本 Chrome 没这个命令，降级成纯鼠标拖拽 —— 对 JS
+            实现的拖放照样有效，只有 HTML5 原生那一类会静默失效
+        """
+        try:
+            self._session.call("Input.setInterceptDrags", {"enabled": True})
+        except ProtocolError:
+            log.debug("Input.setInterceptDrags is unavailable; mouse-only drag")
+            return False
+        return True
+
+    def _kickoff_native(self, head: list[engine.Event]) -> dict[str, Any] | None:
+        """发出起步段，看浏览器认不认这是一次原生拖放。
+
+        :param head: :func:`_split_kickoff` 切出来的起步段
+        :returns: ``Input.dragIntercepted`` 带回来的 ``data``；没被拦截就是 ``None``
+        """
+        seen: list[dict[str, Any]] = []
+
+        def collect(ev: Any) -> None:
+            if ev.method == "Input.dragIntercepted":
+                seen.append(ev.params["data"])
+
+        with self._session.observe_events(collect):
+            self._run(head)
+            if not seen:
+                # _run 末尾的 flush 是顺序屏障，但 dragIntercepted 是浏览器主动抛的，
+                # 完全可能落在那条响应之后。给它一小段收包时间再下结论
+                self._session.pump_events(_DRAG_INTERCEPT_WINDOW)
+        return seen[0] if seen else None
 
     def type(
         self,

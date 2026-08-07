@@ -50,12 +50,46 @@ for r in capture.snapshot():
     print(r.resource_type, r.status, r.url)
 ```
 
-Target one specific profile — by id, by name, or by tag:
+Target one specific profile — by id, by name, or by tag. A name that matches nothing
+fails immediately with the visible names listed, rather than blocking until timeout:
 
 ```python
-with mgr.lease(instance_id="5edcc28a-…") as inst:            ...
-with mgr.lease(where=lambda i: i.name == "Win-US-02") as inst: ...
+with mgr.lease(instance_id="5edcc28a-…") as inst:              ...
+with mgr.lease(name="Win-US-02") as inst:                      ...
 with mgr.lease(where=lambda i: "us" in i.tags) as inst:        ...
+
+handles = pool.lease_many(4, names=NAMES, timeout=60)   # rolls back on partial failure
+```
+
+Drag a slider — the buttons mask stays down for the whole haul, the trajectory
+overshoots and comes back, and there is a pause before the release, because
+*releasing the instant you arrive* is the most reliable machine tell there is:
+
+```python
+s.drag("#captcha-knob", by=(212, 0), human=CAREFUL)
+s.drag_and_drop("#card", "#done-column")     # HTML5 native drag, or a JS one — both
+```
+
+Rotate the exit IP. The tunnel hands out addresses per TCP connection and Chrome
+reuses keep-alive sockets, so a whole run pins to one IP. A fresh browser context is
+the only thing that reliably breaks that — clearing cache, unique query strings, and
+`emulateNetworkConditions` all do nothing ([why](docs/详细文档手册.md)):
+
+```python
+with inst.context() as ctx, ctx.session() as s:   # own socket pool → new exit
+    print(ctx.exit_ip())
+    s.open(url)
+```
+
+Stop paying for bytes you throw away, and shed the tracking cookie afterwards:
+
+```python
+with s.block(types=["Image", "Media", "Font"]) as blocked:
+    s.open(url)
+print(blocked.by_type)                       # {'Image': 34, 'Font': 6}
+
+report = s.clear_site_data("https://example.com")
+print(report.cookies)                        # ('datadome',) — what actually went away
 ```
 
 Three providers' worth of instances, one logical pool:
@@ -146,6 +180,7 @@ happily as sleight's own transport.
 | Overshoot | past the target then back, distance-scaled | exact arrival |
 | Typing | per-character events, interval by digraph class | one `insertText` |
 | Scrolling | repeated small `mouseWheel` deltas | one `scrollTo` |
+| Dragging | buttons mask held the whole way, slider-grade overshoot, pause before release | teleport, or release on arrival |
 
 Parameters are not invented. They come from the
 [WindMouse](https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/) physical
@@ -156,11 +191,14 @@ variable).
 
 ## Scope
 
-**Does:** navigation and typed wait conditions · rendered-DOM reads · CSS queries ·
-human mouse / keyboard / wheel · structured network-resource capture · instance
-discovery across providers · cooperative exclusive leasing with TTL renewal
-(in-memory, or Redis-backed across processes) · idempotent recovery · deploying and
-operating CloakBrowser Manager over local docker or SSH, extensions included.
+**Does:** navigation, reload and history · typed wait conditions · rendered-DOM reads ·
+CSS queries · human mouse / keyboard / wheel / **drag** · element screenshots · forms
+(`select_option`, `upload_file`) · isolated **browser contexts** for exit-IP rotation ·
+origin-scoped **site-data clearing** · **request blocking** via the Fetch domain ·
+`exit_ip()` · structured network-resource capture · instance discovery across providers ·
+cooperative exclusive leasing with TTL renewal (in-memory, or Redis-backed across
+processes) · idempotent recovery · deploying and operating CloakBrowser Manager over
+local docker or SSH, extensions included.
 
 **Does not:** data extraction · scheduling and queues · fingerprint spoofing (that is
 the browser's job) · iframe / OOPIF / Shadow DOM piercing · strict fencing · WebDriver
@@ -169,10 +207,38 @@ BiDi · Firefox.
 The deploy layer lives in its own subpackage and is never imported by `import sleight`,
 so the driver stays a one-dependency library.
 
+## Known limits
+
+Measured, not assumed. Each of these cost someone a day to find out:
+
+| | |
+|---|---|
+| **No extensions inside a browser context** | `Target.createBrowserContext` makes an off-the-record context, and Chrome does not enable extensions there. Same profile, same URL: `chrome-extension://<id>/…` opens in the default context and returns `ERR_BLOCKED_BY_CLIENT` in a fresh one. So **rotating the exit IP and using a plugin are mutually exclusive** — if your run depends on one, rotate by leasing different profiles with different upstream proxies instead. |
+| **`reload()` on a redirecting URL can return early** | One redirect is two document commits, and the intermediate one may fire its own `DOMContentLoaded`. Measured 3/8 on `http://` → `https://`, 0/8 without the redirect. Not specific to sleight. Wait on something page-specific (`Selector`, `Text`) when it matters. |
+| **`block()` only bites while sleight is talking to the browser** | Paused requests need the event pump, which runs inside `open` / `wait` / `pump_events` / every `call`. A plain `time.sleep()` stalls them. |
+| **`Transport` belongs to the thread that created it** | Enforced, not documented-and-hoped: cross-thread use raises. Lease one instance per thread. `Pool` and the lease table are shared on purpose. |
+| **`set_viewport()` does not change `screen.*`, and `clear_viewport()` may not resize anything** | The override is render-layer; screen dimensions are a profile fingerprint field fixed at launch. Clearing the override only guarantees *no override* — measured on Chromium 146 + Xvnc, the window bounced back on half the attempts and stayed at the overridden size on the other half. Set the size you want; do not rely on restoring. |
+
+## Roadmap
+
+Ordered by what actually blocks work, not by size.
+
+- **iframe / frame support** — `s.frames()`, `with s.frame(sel) as fs:`. The one real
+  gap. CAPTCHAs live in iframes (DataDome's does), so `drag` and element screenshots —
+  both shipped — still cannot reach a slider inside one. Needs a frame tree,
+  cross-frame coordinate mapping, and a separate session per OOPIF.
+- **Context vs. lightweight-instance resource numbers** — memory, CPU, and time-to-ready
+  for *instance with proxy+plugin* / *bare instance* / *N contexts in one instance*.
+  Nobody should redesign their concurrency around contexts without this table, so the
+  API stays an opt-in dimension until the numbers exist.
+- **`launch_args_effective`** — `get_profile()` returns the *configured* launch args;
+  the effective command line lives on the Manager side. Diagnosing proxy problems
+  currently means reading `chrome://version`.
+
 ## Status
 
-`0.x` — alpha, the API will move. Every release documents its breaking changes.
-Releases are published from a git tag by
+`0.x` — alpha, the API will move. Every release documents its breaking changes in its
+git tag. Releases are published from that tag by
 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) via PyPI Trusted
 Publishing — no token is stored in this repository.
 

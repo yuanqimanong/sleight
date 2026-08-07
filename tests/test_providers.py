@@ -17,12 +17,20 @@ import io
 import json
 import urllib.error
 import urllib.request
+from datetime import timedelta
 
 import pytest
 
 from sleight.core.errors import AuthError, ConnectionError, InstanceError, NotFound, NotReady
 from sleight.core.types import InstanceStatus
-from sleight.providers.cloakbrowser import TOKEN_ENV, CloakBrowserManager, ProfileSpec
+from sleight.providers.cloakbrowser import (
+    CLEAR,
+    SEED_MAX,
+    TOKEN_ENV,
+    UNSET,
+    CloakBrowserManager,
+    ProfileSpec,
+)
 from sleight.providers.plain import Plain
 
 BASE = "http://mgr.test:19000"
@@ -573,12 +581,23 @@ def test_cdp_targets_returns_the_target_list(monkeypatch: pytest.MonkeyPatch):
     assert mgr.cdp_targets("p1") == targets
 
 
-def test_cdp_targets_of_a_stopped_instance_is_empty_not_an_error(monkeypatch: pytest.MonkeyPatch):
-    """停止的实例访问 CDP 返回 404 —— 那是"没有 target"，不是故障。"""
+def test_cdp_targets_of_a_stopped_instance_raises_not_ready(monkeypatch: pytest.MonkeyPatch):
+    """「实例没起来」和「跑着但扩展没加载」都返回 [] 的话，前者会被读成后者。
+
+    而这两件事的处理方式完全相反：一个要 launch，一个要查扩展。
+    """
     mgr, _ = manager(
         monkeypatch,
         {("GET", "/api/profiles/p1/cdp/json/list"): (404, {"detail": "Profile not running"})},
     )
+    with pytest.raises(NotReady, match="not running"):
+        mgr.cdp_targets("p1")
+
+
+def test_a_running_instance_with_no_targets_is_still_an_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mgr, _ = manager(monkeypatch, {("GET", "/api/profiles/p1/cdp/json/list"): (200, [])})
     assert mgr.cdp_targets("p1") == []
 
 
@@ -622,3 +641,231 @@ def test_stop_gets_the_same_long_timeout(monkeypatch: pytest.MonkeyPatch):
     mgr, http = manager(monkeypatch, {("POST", "/api/profiles/p1/stop"): (200, {"ok": True})})
     mgr.stop("p1")
     assert [t for m, p, t in http.timeouts if m == "POST"] == [mgr.lifecycle_timeout]
+
+
+# --------------------------------------------------------------------------- #
+# UNSET / CLEAR —— 消灭 None vs "" 的陷阱
+# --------------------------------------------------------------------------- #
+
+
+def test_unset_and_none_are_both_left_out_of_the_payload():
+    spec = ProfileSpec(name="x", proxy=UNSET, notes=None)
+    payload = spec.to_payload()
+    assert "proxy" not in payload and "notes" not in payload
+
+
+def test_clear_is_sent_as_an_empty_value():
+    assert ProfileSpec(name="x", proxy=CLEAR).to_payload()["proxy"] == ""
+
+
+def test_a_bare_empty_string_is_refused_by_validate():
+    """proxy='' 清空、proxy=None 保留 —— 只差一个字符，做的是相反的事。"""
+    with pytest.raises(ValueError, match="CLEAR"):
+        ProfileSpec(name="x", proxy="").validate()
+
+
+def test_clear_does_not_confuse_the_geoip_check():
+    """CLEAR 代表"要清掉"，所以 geoip 仍然是"没有代理可推导"。"""
+    with pytest.raises(ValueError, match="nothing to derive"):
+        ProfileSpec(name="x", geoip=True, proxy=CLEAR).validate()
+
+
+def test_clear_does_not_break_the_gpu_string_check():
+    ProfileSpec(name="x", platform="macos", gpu_renderer=CLEAR, gpu_vendor=CLEAR).validate()
+
+
+def test_update_profile_sends_an_empty_string_for_clear(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = manager(monkeypatch, {("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING)})
+    mgr.update_profile("p1", proxy=CLEAR)
+    assert http.bodies("PUT", "/api/profiles/p1") == [{"proxy": ""}]
+
+
+def test_update_profile_drops_unset_fields(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = manager(monkeypatch, {("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING)})
+    mgr.update_profile("p1", proxy=UNSET, notes="kept")
+    assert http.bodies("PUT", "/api/profiles/p1") == [{"notes": "kept"}]
+
+
+def test_update_profile_refuses_a_bare_empty_string(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = manager(monkeypatch, {("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING)})
+    with pytest.raises(ValueError, match="CLEAR"):
+        mgr.update_profile("p1", proxy="")
+    assert not http.paths("PUT"), "sent the request anyway"
+
+
+def test_an_update_that_changes_nothing_is_a_mistake(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = manager(monkeypatch, {("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING)})
+    with pytest.raises(ValueError, match="nothing to change"):
+        mgr.update_profile("p1", proxy=UNSET)
+    assert not http.paths("PUT")
+
+
+# --------------------------------------------------------------------------- #
+# #8 prune_profiles / #9 restart / #11 随机指纹种子
+# --------------------------------------------------------------------------- #
+
+
+def profile(name, *, pid=None, tags=(), created=None, status="stopped"):
+    raw = {"id": pid or name, "name": name, "status": status,
+           "tags": [{"tag": t} for t in tags]}
+    if created:
+        raw["created_at"] = created
+    return raw
+
+
+FLEET = [
+    profile("reuters-test-1", tags=("scratch",), created="2026-01-01T00:00:00Z"),
+    profile("reuters-test-2", tags=("scratch", "us"), created="2026-08-06T00:00:00Z"),
+    profile("prod-hk-01", tags=("us",), created="2026-01-01T00:00:00Z"),
+    profile("no-timestamp"),
+]
+
+
+def fleet_manager(monkeypatch, extra=None):
+    routes = {("GET", "/api/profiles"): (200, FLEET), **(extra or {})}
+    for p in FLEET:
+        routes.setdefault(("GET", f"/api/profiles/{p['id']}/status"), ST_STOPPED)
+        routes.setdefault(("DELETE", f"/api/profiles/{p['id']}"), (200, {}))
+    return manager(monkeypatch, routes)
+
+
+def test_prune_is_dry_by_default(monkeypatch: pytest.MonkeyPatch):
+    """删 profile 连带删 user_data_dir，不可逆 —— 默认必须只是预演。"""
+    mgr, http = fleet_manager(monkeypatch)
+    doomed = mgr.prune_profiles(name_prefix="reuters-test-")
+    assert [p["name"] for p in doomed] == ["reuters-test-1", "reuters-test-2"]
+    assert not http.paths("DELETE"), "dry_run deleted something"
+
+
+def test_prune_actually_deletes_when_told_to(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = fleet_manager(monkeypatch)
+    gone = mgr.prune_profiles(name_prefix="reuters-test-", dry_run=False)
+    assert [p["name"] for p in gone] == ["reuters-test-1", "reuters-test-2"]
+    assert sorted(http.paths("DELETE")) == [
+        "/api/profiles/reuters-test-1", "/api/profiles/reuters-test-2",
+    ]
+
+
+def test_prune_with_no_filter_is_refused(monkeypatch: pytest.MonkeyPatch):
+    """"删掉全部"必须是写出来的意图，不能是少传一个参数的后果。"""
+    mgr, http = fleet_manager(monkeypatch)
+    with pytest.raises(ValueError, match='name_prefix=""'):
+        mgr.prune_profiles(dry_run=False)
+    assert not http.paths("DELETE")
+
+
+def test_prune_by_tag(monkeypatch: pytest.MonkeyPatch):
+    mgr, _ = fleet_manager(monkeypatch)
+    assert {p["name"] for p in mgr.prune_profiles(tags=["scratch"])} == {
+        "reuters-test-1", "reuters-test-2"
+    }
+
+
+def test_prune_filters_are_and_not_or(monkeypatch: pytest.MonkeyPatch):
+    mgr, _ = fleet_manager(monkeypatch)
+    assert [p["name"] for p in mgr.prune_profiles(name_prefix="prod-", tags=["us"])] == [
+        "prod-hk-01"
+    ]
+
+
+def test_prune_older_than_skips_profiles_with_no_timestamp(monkeypatch: pytest.MonkeyPatch):
+    """读不出建立时间就不删 —— 批量删除里"看不懂就不动"是唯一安全的默认值。"""
+    mgr, _ = fleet_manager(monkeypatch)
+    names = {p["name"] for p in mgr.prune_profiles(
+        name_prefix="", older_than=timedelta(days=30)
+    )}
+    assert "no-timestamp" not in names
+    assert "reuters-test-1" in names and "prod-hk-01" in names
+    assert "reuters-test-2" not in names, "that one is recent"
+
+
+def test_one_undeletable_profile_does_not_strand_the_rest(monkeypatch: pytest.MonkeyPatch):
+    """删了一半就报错是批量清理最难收拾的状态。"""
+    mgr, _http = fleet_manager(
+        monkeypatch,
+        {("DELETE", "/api/profiles/reuters-test-1"): (500, {"detail": "busy"})},
+    )
+    gone = mgr.prune_profiles(name_prefix="reuters-test-", dry_run=False)
+    assert [p["name"] for p in gone] == ["reuters-test-2"]
+
+
+def test_update_profile_restart_restarts_a_running_instance(monkeypatch: pytest.MonkeyPatch):
+    """proxy / fingerprint_seed 改了不重启就不生效，而 Manager 只提示不执行。"""
+    mgr, http = manager(monkeypatch, {
+        ("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING),
+        ("GET", "/api/profiles/p1/status"): ST_RUNNING,
+        ("POST", "/api/profiles/p1/stop"): (200, {}),
+        ("POST", "/api/profiles/p1/launch"): (200, {}),
+        ("GET", "/api/profiles/p1"): (200, PROFILE_RUNNING),
+    })
+    mgr.update_profile("p1", proxy="socks5://new:1080", restart=True)
+    assert "/api/profiles/p1/stop" in http.paths("POST")
+    assert "/api/profiles/p1/launch" in http.paths("POST")
+
+
+def test_update_profile_restart_does_not_launch_a_stopped_instance(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """拉起一个本来没在跑的实例是另一个决定，而且要占一份内存。"""
+    mgr, http = manager(monkeypatch, {
+        ("PUT", "/api/profiles/p1"): (200, PROFILE_STOPPED),
+        ("GET", "/api/profiles/p1/status"): ST_STOPPED,
+        ("GET", "/api/profiles/p1"): (200, PROFILE_STOPPED),
+    })
+    mgr.update_profile("p1", proxy="socks5://new:1080", restart=True)
+    assert not http.paths("POST")
+
+
+def test_update_profile_does_not_restart_by_default(monkeypatch: pytest.MonkeyPatch):
+    mgr, http = manager(monkeypatch, {("PUT", "/api/profiles/p1"): (200, PROFILE_RUNNING)})
+    mgr.update_profile("p1", proxy="socks5://new:1080")
+    assert not http.paths("POST")
+
+
+def test_a_random_seed_is_drawn_at_payload_time():
+    a = ProfileSpec(name="x", fingerprint_seed="random").to_payload()["fingerprint_seed"]
+    b = ProfileSpec(name="x", fingerprint_seed="random").to_payload()["fingerprint_seed"]
+    assert isinstance(a, int) and 1 <= a <= SEED_MAX
+    assert a != b, "every profile getting the same seed is the bug this feature fixes"
+
+
+def test_randomized_picks_a_preset_and_a_seed():
+    spec = ProfileSpec.randomized("scrape-01", "windows_hk")
+    assert spec.fingerprint_seed == "random"
+    assert spec.timezone == "Asia/Hong_Kong"
+    assert isinstance(spec.to_payload()["fingerprint_seed"], int)
+
+
+def test_randomized_rejects_an_unknown_preset():
+    with pytest.raises(ValueError, match="unknown preset"):
+        ProfileSpec.randomized("x", "windows_jp")
+
+
+def test_a_misspelled_random_is_caught_not_sent():
+    with pytest.raises(ValueError, match="fingerprint_seed"):
+        ProfileSpec(name="x", fingerprint_seed="ramdom").validate()
+
+
+def test_an_out_of_range_seed_is_caught():
+    with pytest.raises(ValueError, match="outside"):
+        ProfileSpec(name="x", fingerprint_seed=0).validate()
+
+
+def test_ensure_profile_does_not_reroll_an_existing_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """"random" 是"建的时候摇一个"，不是"每次 ensure 都换一张身份证"。
+
+    不摘掉的话 to_payload() 每次给新值 → diff 必然非空 → 每跑一遍脚本指纹就变一次。
+    """
+    existing = {"id": "p1", "name": "Win-US", "status": "stopped", "tags": [],
+                "fingerprint_seed": 4242}
+    mgr, http = manager(monkeypatch, {
+        ("GET", "/api/profiles"): (200, [existing]),
+        ("PUT", "/api/profiles/p1"): (200, existing),
+    })
+    mgr.ensure_profile(ProfileSpec.randomized("Win-US"))
+    bodies = http.bodies("PUT", "/api/profiles/p1")
+    assert all("fingerprint_seed" not in (b or {}) for b in bodies), (
+        f"rerolled the fingerprint: {bodies}"
+    )

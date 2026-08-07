@@ -21,6 +21,7 @@ from .protocol import Event
 
 __all__ = [
     "RESOURCE_TYPES",
+    "BlockStats",
     "DedupeKey",
     "NetworkResource",
     "ResourceTracker",
@@ -35,6 +36,41 @@ RESOURCE_TYPES = frozenset({
 })
 
 DedupeKey = Literal["url", "request_id"]
+
+
+class BlockStats:
+    """:meth:`Session.block() <sleight.core.session.Session.block>` 拦下了多少。
+
+    可变的计数器，不是 frozen 数据类 —— 它在 ``with`` 块里一直被写。退出后仍然可读。
+    """
+
+    __slots__ = ("_allowed", "_blocked")
+
+    def __init__(self) -> None:
+        self._blocked: dict[str, int] = {}
+        self._allowed = 0
+
+    def __repr__(self) -> str:
+        return f"<BlockStats blocked={self.blocked} allowed={self.allowed} {self.by_type}>"
+
+    def _count(self, kind: str, *, blocked: bool) -> None:
+        if blocked:
+            self._blocked[kind] = self._blocked.get(kind, 0) + 1
+        else:
+            self._allowed += 1
+
+    @property
+    def by_type(self) -> dict[str, int]:
+        """按 ``ResourceType`` 分组的拦截数。快照，不是视图。"""
+        return dict(self._blocked)
+
+    @property
+    def blocked(self) -> int:
+        return sum(self._blocked.values())
+
+    @property
+    def allowed(self) -> int:
+        return self._allowed
 
 
 @dataclass(frozen=True, slots=True)

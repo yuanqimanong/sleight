@@ -33,6 +33,7 @@ from .core.session import Selectable, Session
 from .core.transport import Transport
 from .core.types import (
     Box,
+    ClearReport,
     Condition,
     DomReady,
     Endpoint,
@@ -43,9 +44,10 @@ from .core.types import (
     NetworkIdle,
     Point,
     Selector,
+    StorageType,
     Text,
 )
-from .pool import InstanceHandle, Pool
+from .pool import BrowserContext, InstanceHandle, Pool
 
 try:
     __version__ = _installed_version("sleight")
@@ -57,6 +59,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "connect",
     "Pool",
     "InstanceHandle",
+    "BrowserContext",
     "Session",
     "Selectable",
     "Element",
@@ -82,6 +85,8 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "Endpoint",
     "InstanceInfo",
     "InstanceStatus",
+    "StorageType",
+    "ClearReport",
     # 异常
     "errors",
     "SleightError",
