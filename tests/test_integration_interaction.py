@@ -28,16 +28,52 @@ document.body.innerHTML = `
   <div style="height:40px"></div>
   <button id="btn" style="width:160px;height:44px">Click me</button>
   <input id="inp" style="width:320px;height:32px;font-size:16px">
+  <div id="track" style="position:relative;width:340px;height:40px;background:#eee">
+    <div id="knob" style="position:absolute;left:0;top:0;width:40px;height:40px;background:#333"></div>
+  </div>
+  <div id="card" draggable="true" style="width:120px;height:60px;background:#8cf">card</div>
+  <div id="zone" style="width:200px;height:80px;background:#fc8">zone</div>
   <div style="height:1600px"></div>
   <button id="deep" style="width:160px;height:44px">Far below</button>
 `;
-window.__log = {moves: 0, downs: [], ups: [], clicks: [], keys: [], wheels: 0, untrusted: 0};
+window.__log = {moves: 0, downs: [], ups: [], clicks: [], keys: [], wheels: 0, untrusted: 0,
+                held: [], slider: null, dnd: []};
 const L = window.__log;
 document.addEventListener('mousemove', e => {
   L.moves++;
   if (!e.isTrusted) L.untrusted++;
+  if (e.buttons) L.held.push([e.clientX, e.clientY, e.buttons, e.timeStamp]);
   (L.trail = L.trail || []).push([e.clientX, e.clientY]);
 }, true);
+
+// 纯 JS 实现的滑块 —— 只认 mousedown/mousemove/mouseup，对 HTML5 拖放事件毫无反应
+(() => {
+  const track = document.getElementById('track'), knob = document.getElementById('knob');
+  let grab = null;
+  knob.addEventListener('mousedown', e => { grab = e.clientX - knob.offsetLeft; });
+  document.addEventListener('mousemove', e => {
+    if (grab === null) return;
+    const max = track.clientWidth - knob.offsetWidth;
+    knob.style.left = Math.max(0, Math.min(max, e.clientX - grab)) + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    if (grab === null) return;
+    grab = null;
+    L.slider = {left: knob.offsetLeft, releasedAt: performance.now()};
+  });
+})();
+
+// HTML5 原生拖放 —— 反过来，只认 dragstart/dragover/drop，对鼠标事件毫无反应
+(() => {
+  const card = document.getElementById('card'), zone = document.getElementById('zone');
+  card.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', 'card');
+    L.dnd.push('dragstart');
+  });
+  for (const kind of ['dragenter', 'dragover', 'drop']) {
+    zone.addEventListener(kind, e => { e.preventDefault(); L.dnd.push(kind); });
+  }
+})();
 document.addEventListener('mousedown', e => {
   if (!e.isTrusted) L.untrusted++;
   L.downs.push({x: e.clientX, y: e.clientY, button: e.button, buttons: e.buttons, t: e.timeStamp});
@@ -244,3 +280,54 @@ def test_cursor_position_is_continuous_across_actions(probe):
     trail = probe.eval("JSON.stringify(window.__log.trail)")
     start = json.loads(trail)[0]
     assert abs(start[0] - first.x) < 80 and abs(start[1] - first.y) < 80
+
+
+# --------------------------------------------------------------------------- #
+# 拖拽
+# --------------------------------------------------------------------------- #
+
+
+def test_drag_moves_a_javascript_slider(probe):
+    """滑块只认 mousedown/mousemove/mouseup —— 键必须真的一路按着。"""
+    probe.drag("#knob", by=(220, 0))
+    data = log(probe)
+
+    assert data["untrusted"] == 0
+    assert data["slider"] is not None, "mouseup never reached the slider"
+    assert data["slider"]["left"] > 150, f"knob only moved to {data['slider']['left']}px"
+    assert all(b for *_, b, _ in data["held"]), "a move with buttons=0 slipped into the haul"
+    assert len(data["held"]) > 10, f"only {len(data['held'])} held moves — that is a teleport"
+
+
+def test_the_slider_pauses_before_release(probe):
+    """到位即松手是最稳定的机器特征之一。页面这边量的就是这段空隙。"""
+    probe.drag("#knob", by=(220, 0), human=CAREFUL)
+    data = log(probe)
+
+    settle = data["ups"][-1]["t"] - data["held"][-1][3]     # ms，timeStamp 是毫秒
+    lo, hi = CAREFUL.drag_settle
+    assert settle >= lo * 1000 * 0.8, f"released {settle:.0f} ms after the last move"
+    assert settle < hi * 1000 + 500, f"{settle:.0f} ms is a hang, not a hesitation"
+
+
+def test_drag_does_not_reach_html5_draggables(probe):
+    """对照组：纯鼠标事件对原生拖放完全无效 —— 这正是 drag_and_drop 存在的理由。"""
+    probe.drag("#card", to="#zone")
+    assert log(probe)["dnd"] == []
+
+
+def test_drag_and_drop_drives_native_html5_drag(probe):
+    probe.drag_and_drop("#card", "#zone")
+    dnd = log(probe)["dnd"]
+
+    assert "dragstart" in dnd, "the browser never started a native drag"
+    assert dnd[-1] == "drop", f"drop never fired; got {dnd}"
+    assert "dragenter" in dnd
+
+
+def test_drag_and_drop_falls_back_to_the_mouse_for_the_slider(probe):
+    """同一个方法要能吃下另一半世界 —— 滑块不是原生可拖的。"""
+    probe.drag_and_drop("#knob", "#zone")
+    data = log(probe)
+    assert data["dnd"] == [], "dispatched drag events at an element that never intercepted"
+    assert data["slider"] is not None, "and the mouse fallback did not run either"

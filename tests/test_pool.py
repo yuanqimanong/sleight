@@ -8,7 +8,8 @@ import pytest
 
 from sleight import Pool
 from sleight import pool as pool_module
-from sleight.core.errors import ConnectionError, NotFound
+from sleight.core.errors import ConnectionError, NotFound, TimeoutError
+from sleight.core.types import InstanceInfo
 
 from .conftest import FakeProvider
 
@@ -91,11 +92,104 @@ def test_where_predicate_filters_on_tags():
         assert h.info.id in {"i0", "i2"}
 
 
-def test_where_that_matches_nothing_does_not_spin_forever():
+def test_where_that_matches_nothing_fails_immediately():
+    """「都被占着」和「根本没有这个实例」是两回事，报错也必须是两个。"""
     pool = Pool([FakeProvider(2)])
-    with pytest.raises(Exception) as exc:
-        pool.lease(where=lambda i: False, timeout=0.3)
-    assert "no free instance" in str(exc.value) or "within" in str(exc.value)
+    started = time.monotonic()
+    with pytest.raises(NotFound) as exc:
+        pool.lease(where=lambda i: False, timeout=30)
+    assert time.monotonic() - started < 1.0, "blocked to the timeout on a filter that can't match"
+    assert "fake:i0" in str(exc.value), "the error must list what IS visible — it's a typo 9/10 times"
+
+
+def test_lease_by_name():
+    p = FakeProvider(3)
+    with Pool([p]).lease(name="fake-1") as h:
+        assert h.info.name == "fake-1"
+
+
+def test_lease_by_one_of_several_names():
+    with Pool([FakeProvider(3)]).lease(names=["fake-2", "nope"]) as h:
+        assert h.info.name == "fake-2"
+
+
+def test_a_misspelled_name_says_so_instead_of_timing_out():
+    """打错名字却阻塞到 TimeoutError —— 从错误信息完全看不出是配错了。"""
+    with pytest.raises(NotFound) as exc:
+        Pool([FakeProvider(2)]).lease(name="Win-US-02", timeout=30)
+    text = str(exc.value)
+    assert "'Win-US-02'" in text
+    assert "fake-0" in text and "fake-1" in text
+
+
+def test_name_and_names_together_is_a_mistake():
+    with pytest.raises(ValueError, match="not both"):
+        Pool([FakeProvider(1)]).lease(name="a", names=["b"])
+
+
+def test_an_empty_pool_says_it_is_empty():
+    with pytest.raises(NotFound, match="pool is empty"):
+        Pool([FakeProvider(0)]).lease(name="anything")
+
+
+def test_long_instance_lists_are_truncated_in_the_error():
+    with pytest.raises(NotFound) as exc:
+        Pool([FakeProvider(40)]).lease(name="nope")
+    assert "more" in str(exc.value)
+    assert len(str(exc.value)) < 600, "unreadable wall of names"
+
+
+def test_ready_only_keeps_blocking_because_it_filters_state_not_identity():
+    """实例这会儿没起来不代表它不存在 —— 等下去是有意义的，报 NotFound 不是。"""
+    p = FakeProvider(2)
+    p.list_instances = lambda: [                      # type: ignore[method-assign]
+        InstanceInfo(id="i0", provider="fake", ready=False, name="fake-0"),
+    ]
+    with pytest.raises(TimeoutError):
+        Pool([p]).lease(ready_only=True, timeout=0.3)
+
+
+# --------------------------------------------------------------------------- #
+# lease_many
+# --------------------------------------------------------------------------- #
+
+
+def test_lease_many_hands_out_distinct_instances():
+    handles = Pool([FakeProvider(3)]).lease_many(3)
+    try:
+        assert len({h.info.uid for h in handles}) == 3
+    finally:
+        for h in handles:
+            h.close()
+
+
+def test_lease_many_rolls_back_everything_when_one_fails():
+    """拿到 3 个第 4 个超时，那 3 个必须还回去 —— 否则它们被占满一整个 TTL。"""
+    pool = Pool([FakeProvider(3)])
+    with pytest.raises(TimeoutError):
+        pool.lease_many(4, timeout=0.3)
+
+    # 全还回去了才租得到下一批
+    handles = pool.lease_many(3, block=False)
+    for h in handles:
+        h.close()
+
+
+def test_lease_many_timeout_covers_the_whole_batch():
+    """每个都给 timeout 的话，一批 8 个最坏要等 8 倍 —— 而调用方以为写的是 timeout。"""
+    pool = Pool([FakeProvider(1)])
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        pool.lease_many(4, timeout=0.6)
+    assert time.monotonic() - started < 2.0
+
+
+def test_lease_many_refuses_nonsense():
+    pool = Pool([FakeProvider(2)])
+    with pytest.raises(ValueError, match="n >= 1"):
+        pool.lease_many(0)
+    with pytest.raises(ValueError, match="instance_id"):
+        pool.lease_many(2, instance_id="i0")
 
 
 def test_unknown_instance_id_is_not_found():

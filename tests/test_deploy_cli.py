@@ -246,6 +246,24 @@ def test_purge_data_with_yes_goes_through(target):
     assert target.ran("rm", "-rf", "/srv/cbm/data")
 
 
+def test_purge_image_needs_no_confirmation(capsys, target):
+    """删镜像可逆（重新 pull 就回来），不该跟删 data/ 一样要 --yes。"""
+    cli.main(["deploy"])
+    capsys.readouterr()
+    assert cli.main(["destroy", "--purge-image"]) == cli.EXIT_OK
+    assert target.ran("docker", "image", "rm")
+    out = capsys.readouterr().out
+    assert "镜像" in out and "data/ 保留" in out
+
+
+def test_purging_everything_in_one_go(capsys, target):
+    cli.main(["deploy"])
+    capsys.readouterr()
+    assert cli.main(["destroy", "--purge-data", "--purge-image", "--yes"]) == cli.EXIT_OK
+    assert target.ran("rm", "-rf", "/srv/cbm/data")
+    assert target.ran("docker", "image", "rm")
+
+
 def test_upgrade_swaps_the_image(capsys, target):
     cli.main(["deploy"])
     capsys.readouterr()
@@ -475,3 +493,38 @@ def test_a_closed_output_pipe_is_not_a_traceback(capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "_dump", explode)
     assert cli.main(["--json", "templates"]) == cli.EXIT_SIGPIPE
+
+
+def test_a_local_deploy_hands_out_the_local_url_not_the_tunnel_port(capsys, target):
+    """写死 19000 的话，本机用户会照着这段去连一个根本没人监听的端口。
+
+    而同一屏上面两行刚说过是 9000 —— 自相矛盾的成功输出比报错还难查。
+    """
+    cli.main(["deploy", "--port", "9000"])
+    out = capsys.readouterr().out
+    assert 'CloakBrowserManager("http://127.0.0.1:9000")' in out
+    assert "19000" not in out, "本机部署不该出现隧道端口"
+
+
+def test_a_remote_deploy_hands_out_the_tunnel_port(capsys, target):
+    """反过来：远程时 Manager 只绑在目标机的 127.0.0.1，本地端口才是能连的那个。
+
+    和上一条一起把两个分支都钉住 —— 只测本机的话，把整个条件删成 local_url 也照样绿。
+    """
+    target.target = "deploy@10.0.0.12"                    # 让 _tunnel_hint 认为是远程
+    cli.main(["deploy", "--port", "9000"])
+    out = capsys.readouterr().out
+    assert 'CloakBrowserManager("http://127.0.0.1:19000")' in out
+    assert '"http://127.0.0.1:9000")' not in out, "远程给的是目标机端口，本地连不上"
+
+
+def test_history_accepts_host_as_well_as_only_host(capsys, target):
+    """别的子命令全是 --host，连敲五遍之后第六遍还会敲它。"""
+    cli.main(["hosts", "add", "hk", "--ssh", "u@h", "--dir", "/srv/a"])
+    cli.main(["deploy", "--host", "hk"])
+    capsys.readouterr()
+
+    assert cli.main(["history", "--host", "hk"]) == cli.EXIT_OK
+    by_host = capsys.readouterr().out
+    assert cli.main(["history", "--only-host", "hk"]) == cli.EXIT_OK
+    assert capsys.readouterr().out == by_host

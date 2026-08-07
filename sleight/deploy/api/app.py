@@ -28,9 +28,16 @@ from ...core.errors import SleightError
 from ..engine import Deployer
 from ..errors import DeployError
 from ..ops import ExtensionOps, ProfileOps, extension_paths
+from ..preflight import parse_mem_total_kb
 from ..presets import DEPLOY_TEMPLATES, FIELD_HELP, PROFILE_PRESETS, profile_spec_from
 from ..spec import DEFAULT_IMAGE, DeploySpec
 from ..store import Deployment, Host, Store
+
+
+def _format_mem(result: Any) -> str:
+    """``/proc/meminfo`` → ``"3.8 GB"``。和 preflight 用同一个解析函数。"""
+    total = parse_mem_total_kb(result.text)
+    return f"{total / 1024 / 1024:.1f} GB" if total else "读不出来"
 
 log = logging.getLogger("sleight.deploy.api")
 
@@ -223,6 +230,19 @@ def create_app(*, token: str | None = None) -> Any:
         except Exception:                                  # 记账不该阻断
             log.debug("记流水失败", exc_info=True)
 
+    def _persist(deployment: Deployment, spec: DeploySpec, say: Callable[[str], None]) -> None:
+        """把这次实际用的 spec 写回库。失败只提示，不让已经成功的部署变成失败。"""
+        try:
+            current = store().get_deployment(deployment.host, deployment.name)
+            if current is not None and current.spec == spec:
+                return
+            store().put_deployment(deployment.host, deployment.name, spec)
+            say(f"记录已更新：{deployment.ref} → {spec.dir}:{spec.port}")
+        except Exception as exc:
+            say(f"注意：部署成功了，但本地记录没更新（{exc}）。"
+                f"记录里还写着旧参数，之后的操作会去错地方。")
+            log.warning("could not persist spec for %s", deployment.ref, exc_info=True)
+
     def wrap(fn: Callable[[], Any]) -> Any:
         """把库里的异常翻成 HTTP 错误，而不是 500 + 一页 traceback。"""
         try:
@@ -293,7 +313,10 @@ def create_app(*, token: str | None = None) -> Any:
                         "hint": "目标机上没有可用的 docker。装好并把当前用户加进 docker 组"
                                 "（usermod -aG docker $USER，然后重新登录）。"}
             step("compose", ["docker", "compose", "version", "--short"])
-            step("内存", ["sh", "-c", "free -g | awk 'NR==2{print $2\" GB\"}'"])
+            # 走 /proc/meminfo 而不是 free -g：后者向下取整，3.8 GB 的机器显示成
+            # "3 GB"，比 preflight 少报近 1 GB。同一台机两个界面报不同的数字，
+            # 使用者只会怀疑工具。这里和 preflight 共用同一个解析函数
+            step("内存", ["cat", "/proc/meminfo"], parse=_format_mem)
             step("当前用户", ["id", "-un"])
         except (DeployError, SleightError) as exc:
             return {"ok": False, "steps": steps, "hint": f"{type(exc).__name__}: {exc}"}
@@ -417,6 +440,12 @@ def create_app(*, token: str | None = None) -> Any:
         def work(say: Callable[[str], None]) -> dict[str, Any]:
             dep, entry = deployer(ref, on_progress=say, **overrides)
             result = dep.apply(force=force)
+            # **把真正部署下去的 spec 存回库里。** 界面上「部署」那一页是当作"改这个
+            # 部署的参数"来呈现的：改了目录点部署，容器确实去了新目录，但记录还指着
+            # 旧的 —— 之后取 token、看实例、销毁全都会去错地方，而真正的部署变成
+            # 谁也不认识的孤儿。真机上就这么撞出来的
+            if overrides:
+                _persist(entry, dep.spec, say)
             record(entry, "deploy", ok=True, image=dep.spec.image, status=result.status,
                    detail="有变更" if result.changed else "无变更")
             return {
@@ -489,6 +518,7 @@ def create_app(*, token: str | None = None) -> Any:
         """
         ref = _ref(name, deployment)
         purge = bool(body.get("purge_data"))
+        purge_image = bool(body.get("purge_image"))
         if purge:
             # 比对**解析之后**的 host/deployment，不是调用方随手写的那串 ——
             # 确认的是"要销毁哪个东西"，不该取决于你怎么寻址它
@@ -504,10 +534,10 @@ def create_app(*, token: str | None = None) -> Any:
 
         def work(say: Callable[[str], None]) -> dict[str, Any]:
             dep, entry = deployer(ref, on_progress=say)
-            dep.destroy(purge_data=purge)
-            record(entry, "destroy", ok=True,
-                   detail="连 data/ 一起删" if purge else "保留 data/")
-            return {"purged": purge}
+            dep.destroy(purge_data=purge, purge_image=purge_image)
+            gone = ["容器"] + (["data/"] if purge else []) + (["镜像"] if purge_image else [])
+            record(entry, "destroy", ok=True, detail="删了：" + "、".join(gone))
+            return {"purged": purge, "purged_image": purge_image}
 
         return {"job": jobs.start("destroy", ref, work).id}
 

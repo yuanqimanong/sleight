@@ -32,6 +32,8 @@ __all__ = [
     "Event",
     "chord_events",
     "click_events",
+    "drag_events",
+    "drop_events",
     "insert_text_event",
     "key_events",
     "modifier_events",
@@ -40,8 +42,10 @@ __all__ = [
     "reaction_delay",
     "release_events",
     "scroll_events",
+    "settle_delay",
     "span",
     "type_events",
+    "with_trailing_delay",
 ]
 
 #: ``Input.dispatchMouseEvent`` 的 buttons 位掩码
@@ -86,13 +90,23 @@ def move_events(
     :param viewport: ``(宽, 高)`` CSS 像素，用于把 overshoot 夹在窗口内
     :returns: ``(事件序列, 落点)``
     """
-    buttons = BUTTONS.get(held or "", 0)
+    # 拖拽中的移动**两个字段都要给**。``buttons`` 位掩码页面 JS 读得到，但浏览器自己
+    # 的拖拽控制器认的是 ``button`` —— 只给 buttons 的话 JS 实现的滑块照常工作，而
+    # HTML5 原生拖放**一声不吭地不启动**：dragstart 不触发，Input.dragIntercepted
+    # 也永远不来。真机上验过：同一段轨迹，加上 button='left' 才有 dragstart。
+    extra: dict[str, Any] = {"buttons": BUTTONS.get(held or "", 0)}
+    if held is not None:
+        extra["button"] = held
+        if profile is not None:
+            # 拖拽走单列的过冲阈值。指针移动那档是 500 px，而滑块总共才一两百像素宽 ——
+            # 套过去等于永不过冲，正好丢掉滑块场景里最像人的那个特征
+            profile = profile.replace(overshoot_threshold=profile.drag_overshoot_threshold)
 
     if profile is None:
         landing = target.center if isinstance(target, Box) else target
         return (
             [Event("Input.dispatchMouseEvent",
-                   {"type": "mouseMoved", "x": landing.x, "y": landing.y, "buttons": buttons})],
+                   {"type": "mouseMoved", "x": landing.x, "y": landing.y, **extra})],
             landing,
         )
 
@@ -100,7 +114,7 @@ def move_events(
     events = [
         Event(
             "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": p.x, "y": p.y, "buttons": buttons},
+            {"type": "mouseMoved", "x": p.x, "y": p.y, **extra},
             span(profile.step_delay, rng),
         )
         for p in path
@@ -122,6 +136,33 @@ def reaction_delay(rng: Random, profile: HumanProfile | None) -> float:
     :returns: 秒。由调用方在派发 mousePressed 之前 sleep 掉
     """
     return span(profile.reaction, rng) if profile is not None else 0.0
+
+
+def settle_delay(rng: Random, profile: HumanProfile | None) -> float:
+    """拖到位之后、松手之前的迟滞。
+
+    和 :func:`reaction_delay` 一样是一段**纯等待**，不是事件 —— 理由也一样：补一条
+    零位移的 ``mouseMoved`` 来挂这个 sleep，等于在每次拖拽的终点放一个位置恒等于落点
+    的重复上报，一行比较就能挑出来。
+
+    :param rng: 随机源
+    :param profile: 取 ``drag_settle`` 区间；``None``（直通）返回 0
+    :returns: 秒。由调用方在派发 mouseReleased 之前 sleep 掉
+    """
+    return span(profile.drag_settle, rng) if profile is not None else 0.0
+
+
+def with_trailing_delay(events: list[Event], delay: float) -> list[Event]:
+    """把一段等待挂到最后一个事件的尾巴上，而不是补一个空事件来承载它。
+
+    :param events: 事件序列。空列表原样返回（没有尾巴可挂）
+    :param delay: 秒。``<= 0`` 时原样返回
+    :returns: 新列表；``events`` 不变
+    """
+    if not events or delay <= 0:
+        return events
+    last = events[-1]
+    return [*events[:-1], Event(last.method, last.params, last.sleep_after + delay)]
 
 
 def press_events(
@@ -191,16 +232,93 @@ def click_events(
     :returns: ``(事件序列, 落点)``
     """
     moves, landing = move_events(start, target, rng=rng, profile=profile)
-    if moves and (reaction := reaction_delay(rng, profile)):
-        # 反应时间挂在最后一个轨迹点的尾巴上，不补发零位移的 move
-        last = moves[-1]
-        moves[-1] = Event(last.method, last.params, last.sleep_after + reaction)
+    # 反应时间挂在最后一个轨迹点的尾巴上，不补发零位移的 move
+    moves = with_trailing_delay(moves, reaction_delay(rng, profile))
     return (
         moves
         + press_events(landing, button=button, rng=rng, profile=profile, click_count=click_count)
         + release_events(landing, button=button, click_count=click_count),
         landing,
     )
+
+
+def drag_events(
+    start: Point,
+    source: Box | Point,
+    target: Box | Point,
+    *,
+    rng: Random,
+    profile: HumanProfile | None,
+    button: str = "left",
+    viewport: tuple[int, int] | None = None,
+) -> tuple[list[Event], Point]:
+    """完整的一次鼠标拖拽：移动 → 按下 → 按住移动 → 迟滞 → 抬起。
+
+    和"点一下再移动"的关键差别有三处，缺一处就不成立：
+
+    * 拖拽段的 ``buttons`` 位掩码必须一路非零。掩码回 0 的移动是 hover，页面的
+      ``mousemove`` handler 一看 ``e.buttons`` 就知道键没按着；
+    * 过冲阈值走 ``drag_overshoot_threshold``（见 :func:`move_events`）；
+    * 松手前有一段 :func:`settle_delay`。
+
+    ⚠️ 和 :func:`click_events` 一样，:mod:`sleight.core.input` 不走这个函数 —— 它要在
+    按下之前插命中校验，还要探 HTML5 原生拖放。这里是给不需要那些的调用方用的。
+
+    :param start: 光标当前位置
+    :param source: 从哪抓起。Box 会采点，Point 精确到该点
+    :param target: 拖到哪，同上
+    :param rng: 随机源
+    :param profile: 拟人参数；``None`` = 直通（两段各一条 move）
+    :param button: 按住哪个键拖
+    :param viewport: ``(宽, 高)`` CSS 像素
+    :returns: ``(事件序列, 松手点)``
+    :raises ValueError: ``button`` 不认识
+    """
+    approach, grab_at = move_events(start, source, rng=rng, profile=profile, viewport=viewport)
+    approach = with_trailing_delay(approach, reaction_delay(rng, profile))
+    haul, release_at = move_events(
+        grab_at, target, rng=rng, profile=profile, held=button, viewport=viewport
+    )
+    haul = with_trailing_delay(haul, settle_delay(rng, profile))
+    return (
+        approach
+        + press_events(grab_at, button=button, rng=rng, profile=profile)
+        + haul
+        + release_events(release_at, button=button),
+        release_at,
+    )
+
+
+def drop_events(moves: list[Event], data: dict[str, Any]) -> list[Event]:
+    """把一段 ``mouseMoved`` 轨迹翻成 HTML5 原生拖放事件。
+
+    ``Input.setInterceptDrags`` 打开之后，浏览器把原生拖放交给我们驱动 —— 这时候页面
+    收到的应该是 ``dragover`` 而**不是** ``mousemove``。所以这里是"翻译"而不是"追加"：
+    同一条轨迹，换一套事件名，时序原样保留。
+
+    :param moves: :func:`move_events` 产出的轨迹段，**不能为空**
+    :param data: ``Input.dragIntercepted`` 给回来的 ``data``，每条事件都要原样带上
+    :returns: ``dragEnter`` → ``dragOver``×n → ``drop``
+    :raises ValueError: ``moves`` 为空
+    """
+    if not moves:
+        raise ValueError("drop_events() needs at least one move to translate")
+    out = [
+        # 第一条是 dragEnter —— 少了它，靠 dragenter 点亮放置区的实现收不到任何信号
+        Event(
+            "Input.dispatchDragEvent",
+            {"type": "dragEnter" if i == 0 else "dragOver",
+             "x": ev.params["x"], "y": ev.params["y"], "data": data},
+            ev.sleep_after,
+        )
+        for i, ev in enumerate(moves)
+    ]
+    last = moves[-1]
+    out.append(Event(
+        "Input.dispatchDragEvent",
+        {"type": "drop", "x": last.params["x"], "y": last.params["y"], "data": data},
+    ))
+    return out
 
 
 def scroll_events(

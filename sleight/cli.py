@@ -204,7 +204,12 @@ def _record(dep: Deployer, kind: str, *, ok: bool, detail: str = "", status: Any
         logging.getLogger("sleight.cli").debug("记流水失败: %s", exc)
 
 
-def _tunnel_hint(dep: Deployer, *, local_port: int = 19000) -> str:
+#: 提示文案里用的示例本地端口。真开隧道时 `sleight tunnel` 会自己挑一个空闲的，
+#: 这里只是给手写 ssh -L 的人一个具体数字
+_TUNNEL_PORT = 19000
+
+
+def _tunnel_hint(dep: Deployer, *, local_port: int = _TUNNEL_PORT) -> str:
     """开发机怎么连上去。远程时给出手册 A.5 那条隧道命令。"""
     runner = dep.runner
     target = getattr(runner, "target", "")
@@ -266,10 +271,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     else:
         _out(f"  AUTH_TOKEN  {result.token[:8]}…（沿用已有的，sleight token 取完整值）")
     _out()
+    # 本机部署直接就是 spec 里那个端口；远程才是隧道的本地端口。写死 19000 的话，
+    # 本机用户会照着这段去连一个根本没人监听的端口 —— 而上面两行刚说过是 9000
+    remote = bool(getattr(dep.runner, "target", ""))
+    url = f"http://127.0.0.1:{_TUNNEL_PORT}" if remote else dep.spec.local_url
     _out("  代码")
     _out("    from sleight.providers import CloakBrowserManager")
-    _out('    mgr = CloakBrowserManager("http://127.0.0.1:19000")   # token 从 '
-         "SLEIGHT_CLOAK_TOKEN 读")
+    _out(f'    mgr = CloakBrowserManager("{url}")   # token 从 SLEIGHT_CLOAK_TOKEN 读')
     return EXIT_OK
 
 
@@ -370,9 +378,12 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     ):
         _err("已取消")
         return EXIT_ERROR
-    dep.destroy(purge_data=args.purge_data)
-    _record(dep, "destroy", ok=True, detail="连 data/ 一起删" if args.purge_data else "保留 data/")
-    _out("容器已删除" + ("，data/ 也删了" if args.purge_data else "，data/ 保留"))
+    dep.destroy(purge_data=args.purge_data, purge_image=args.purge_image)
+    gone = ["容器"] + (["data/"] if args.purge_data else []) + (
+        ["镜像"] if args.purge_image else [])
+    kept = [] if args.purge_data else ["data/ 保留（deploy 一下就能恢复）"]
+    _record(dep, "destroy", ok=True, detail="删了：" + "、".join(gone))
+    _out("已删除：" + "、".join(gone) + ("；" + "".join(kept) if kept else ""))
     return EXIT_OK
 
 
@@ -868,6 +879,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("destroy", "停并删容器。默认保留 data/", target)
     p.add_argument("--purge-data", action="store_true",
                    help="连 data/ 一起删 —— 全部登录态和 profile 都没了，不可恢复")
+    p.add_argument("--purge-image", action="store_true",
+                   help="连镜像一起删 —— 下次部署要重新拉。同机还有别的部署在用就删不掉")
     p.add_argument("--yes", action="store_true", help="跳过确认")
     p.set_defaults(func=cmd_destroy)
 
@@ -912,7 +925,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # —— 流水 ——
     p = add("history", "看部署/备份/升级/销毁的流水")
-    p.add_argument("--only-host", metavar="NAME", help="只看这台机的")
+    # 也收 --host：别的子命令全是 --host，连着敲了五遍之后第六遍还会敲它。
+    # 这里它只是个过滤条件（不解析部署、不建 Runner），所以规范名是 --only-host
+    p.add_argument("--only-host", "--host", dest="only_host", metavar="NAME",
+                   help="只看这台机的")
     p.add_argument("-n", "--limit", type=int, default=30, metavar="N")
     p.set_defaults(func=cmd_history)
 

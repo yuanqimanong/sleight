@@ -133,6 +133,34 @@ def test_flush_surfaces_the_failing_command():
     assert exc.value.method == "C"
 
 
+def test_a_quiet_command_may_fail_without_taking_the_flush_down():
+    """给"回应一个可能已经不存在的东西"用 —— 典型是 Fetch.continueRequest。
+
+    请求可能在我们回应之前就被浏览器自己取消了，报的 Invalid InterceptionId 是正常
+    现象，不该炸掉一段无关的输入动作。
+    """
+    ws = FakeWS(fail_ids={2})
+    t = Transport(ws)
+    t.send_no_wait("A")
+    t.send_no_wait("Fetch.continueRequest", quiet=True)      # id=2
+    t.send_no_wait("C")
+    t.flush()                                                # 不抛
+
+
+def test_quiet_does_not_leak_to_the_next_flush():
+    """id 集合按 flush 清空 —— 不清的话它只会越攒越大，还可能撞上复用的 id。"""
+    ws = FakeWS(fail_ids={1})
+    t = Transport(ws)
+    t.send_no_wait("Fetch.continueRequest", quiet=True)       # id=1
+    t.flush()
+    assert not t._quiet
+
+    ws.fail_ids = {2}
+    t.send_no_wait("C")                                       # id=2，这条**不是** quiet
+    with pytest.raises(ProtocolError):
+        t.flush()
+
+
 def test_events_are_buffered_not_mistaken_for_responses():
     ws = FakeWS()
     t = Transport(ws)

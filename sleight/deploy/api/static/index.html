@@ -922,7 +922,7 @@ async function showDrift() {
 }
 
 /* ========================================================================== *
- * 11. 危险区 —— 三种「删」的作用范围完全不同
+ * 11. 危险区 —— 四种「删」的作用范围完全不同
  * ========================================================================== */
 
 function dangerView() {
@@ -933,10 +933,11 @@ function dangerView() {
 
   return h("div", { class: "stack" },
     h("div", { class: "callout" },
-      "这里有三种「删」，作用范围完全不同：\n"
+      "这里有四种「删」，作用范围完全不同：\n"
       + "①  删容器 —— 目标机上的容器没了，data/ 还在，重新部署即可恢复\n"
       + "②  删 data/ —— 登录态一起没，不可逆\n"
-      + "③  删记录 —— 只是这台控制机不再记得它，目标机毫发无伤"),
+      + "③  删镜像 —— 磁盘腾出来了，下次部署要重新拉\n"
+      + "④  删记录 —— 只是这台控制机不再记得它，目标机毫发无伤"),
 
     card("① 停并删容器", "data/ 原封不动，登录态都还在。",
       h("button", { class: "danger", onclick: () => {
@@ -952,14 +953,32 @@ function dangerView() {
         h("label", null, "确认"),
         h("div", { class: "why" }, `把 ${S.ref} 原样输入才会执行。`),
         h("input", { id: "purge_confirm", type: "text", placeholder: S.ref })),
+      h("label", { class: "row" },
+        h("input", { id: "purge_image_too", type: "checkbox" }),
+        h("span", null, "顺手把镜像也删了（彻底清场）")),
       h("button", { class: "danger primary", onclick: () => {
         wipe();
+        const alsoImage = $("#purge_image_too").checked;
         runJob(url("/destroy"), {
-          purge_data: true, confirm: $("#purge_confirm").value.trim(),
-        }, () => { log("容器和 data/ 都删了", "bad"); fetchStatus(true); });
+          purge_data: true, purge_image: alsoImage,
+          confirm: $("#purge_confirm").value.trim(),
+        }, () => {
+          log(alsoImage ? "容器、data/、镜像都删了" : "容器和 data/ 都删了", "bad");
+          fetchStatus(true);
+        });
       } }, "连 data/ 一起删")),
 
-    card("③ 只删本地记录", "目标机上的东西一点不碰。",
+    card("③ 连镜像一起删",
+      "容器 + 镜像。data/ 留着。腾磁盘用，代价是下次部署要重新拉镜像（几百 MB 到几 GB）。"
+      + "同一台机上还有别的部署在用这个镜像的话删不掉 —— 那不是错误，日志里会说。",
+      h("button", { class: "danger", onclick: () => {
+        wipe();
+        runJob(url("/destroy"), { purge_data: false, purge_image: true }, () => {
+          log("容器和镜像都删了，data/ 保留", "ok"); fetchStatus(true);
+        });
+      } }, "删容器和镜像")),
+
+    card("④ 只删本地记录", "目标机上的东西一点不碰。",
       when(implicit, h("div", { class: "callout" },
         "「本机」是内置目标，删不掉 —— 删了列表里还会有它。它不占用任何资源。")),
       when(running && !implicit, h("div", { class: "callout" },

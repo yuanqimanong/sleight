@@ -69,6 +69,15 @@ class BaseProvider:
         """
         return self.pool.lease(**kw)
 
+    def lease_many(self, n: int, **kw: Any) -> list[InstanceHandle]:
+        """便利方法：转发到 :attr:`pool`。**不是** Provider 协议的一部分。
+
+        :param n: 要几个
+        :param kw: 原样透传给 :meth:`Pool.lease_many() <sleight.pool.Pool.lease_many>`
+        :returns: ``n`` 个 :class:`~sleight.pool.InstanceHandle`
+        """
+        return self.pool.lease_many(n, **kw)
+
     # 大多数后端不需要这两个
     def recover(self, instance_id: str) -> None:
         return None
@@ -104,9 +113,16 @@ class HTTPProvider(BaseProvider, ABC):
 
     launch_path = "/launch"
     stop_path = "/stop"
+    #: ``ensure_ready()`` 里**轮询 status() 等它变 running** 的总时限，秒。
+    #:
+    #: 和 :attr:`lifecycle_timeout` 分工不同，别混：这个管的是"我在这儿等它就绪能等
+    #: 多久"，那个管的是"launch/stop 这一条 HTTP 请求能挂多久"。同步的 Manager 上
+    #: launch 返回时实例其实已经起来了，这里的轮询一圈就结束；异步的 Manager 上才轮到
+    #: 它真正发挥作用。
     ready_timeout = 60.0
+    #: 上面那个轮询的间隔，秒
     ready_poll = 0.5
-    #: ``launch`` / ``stop`` 的 HTTP 超时，秒。
+    #: ``launch`` / ``stop`` 这**一条 HTTP 请求**的超时，秒。
     #:
     #: **不能用通用的那个 15s。** 这两个接口是**同步**的 —— 它们等浏览器进程真的起来
     #: 或停掉才返回。实测冷启动一个 profile 约 69 秒（3.8 GB 内存的机器，含 Xvnc 拉起

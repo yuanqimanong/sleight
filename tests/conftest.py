@@ -10,7 +10,9 @@ from typing import Any
 
 import pytest
 
+from sleight.core import protocol
 from sleight.core.element import Element
+from sleight.core.errors import ProtocolError
 from sleight.core.types import Box, Endpoint, InstanceInfo, InstanceStatus
 from sleight.deploy.runner import CommandResult
 from sleight.providers.base import BaseProvider
@@ -141,6 +143,8 @@ class FakeSession:
         exists: bool = True,
         focused: bool = True,
         scrollable: bool = True,
+        drag_data: dict[str, Any] | None = None,
+        intercept_drags: bool = True,
     ) -> None:
         self.transport = RecordingTransport(self._observe)
         self.cdp_session_id = "SID"
@@ -157,6 +161,13 @@ class FakeSession:
         self.probes: list[tuple[int, int]] = []      # 命中校验探到的坐标
         self.scrolled_instantly = 0
         self.released_objects = 0
+        #: 非 None 就模拟一个 HTML5 原生可拖元素：按住移动时抛 Input.dragIntercepted
+        self.drag_data = drag_data
+        #: False 模拟老版本 Chrome —— 没有 Input.setInterceptDrags 这条命令
+        self.intercept_drags = intercept_drags
+        self.intercepting = False
+        self._observers: list[Any] = []
+        self._queued: list[protocol.Event] = []
 
     # —— 几何 ——
 
@@ -172,6 +183,34 @@ class FakeSession:
             and params.get("type") == "mouseWheel"
         ):
             self.scroll_y += params.get("deltaY", 0)
+        if (
+            self.intercepting
+            and self.drag_data is not None
+            and not self._queued
+            and method == "Input.dispatchMouseEvent"
+            and params.get("type") == "mouseMoved"
+            and params.get("buttons")
+        ):
+            # 真浏览器是异步抛的 —— 排进队列等 pump_events 取，别在 send 里直接回调
+            self._queued.append(
+                protocol.Event("Input.dragIntercepted", {"data": self.drag_data}, "SID")
+            )
+
+    # —— 事件观察 ——
+
+    @contextmanager
+    def observe_events(self, callback):
+        self._observers.append(callback)
+        try:
+            yield callback
+        finally:
+            self._observers.remove(callback)
+
+    def pump_events(self, duration: float, *, tick: float = 0.25) -> None:
+        for event in self._queued:
+            for callback in self._observers:
+                callback(event)
+        self._queued.clear()
 
     # —— Session 接口 ——
 
@@ -185,6 +224,11 @@ class FakeSession:
         pass
 
     def call(self, method: str, params: dict | None = None, **kw):
+        if method == "Input.setInterceptDrags":
+            if not self.intercept_drags:
+                raise ProtocolError("'Input.setInterceptDrags' wasn't found", code=-32601)
+            self.intercepting = bool((params or {}).get("enabled"))
+            return {}
         if method == "DOM.scrollIntoViewIfNeeded":
             self.scrolled_instantly += 1
             self.scroll_y = self.doc_box.y - self._viewport[1] * 0.4

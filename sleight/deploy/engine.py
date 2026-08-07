@@ -590,13 +590,23 @@ class Deployer:
             )
         return self.upgrade(previous, backup=False, wait=wait)
 
-    def destroy(self, *, purge_data: bool = False) -> None:
+    def destroy(self, *, purge_data: bool = False, purge_image: bool = False) -> None:
         """停并删容器。
 
-        **永远不带 ``-v``**，也永远不主动删 ``data/``。``purge_data=True`` 才删，
-        而那是不可逆的：profile 数据库、指纹种子、Cookie 和全部登录态都在里面。
+        **永远不带 ``-v``**，也永远不主动删 ``data/``。三件东西是分开的，删掉的代价
+        完全不同：
+
+        =============== ================================== ==================
+        删什么           丢什么                              还能回来吗
+        =============== ================================== ==================
+        容器（默认）      运行中的进程                        ``deploy`` 一下就回来
+        ``purge_data``   profile、Cookie、全部登录态          **不可逆**
+        ``purge_image``  本机的镜像层                        要重新 pull（或再传一次）
+        =============== ================================== ==================
 
         :param purge_data: 连 ``data/`` 一起删。调用方必须先向人确认过
+        :param purge_image: 连镜像一起删。**同一台机上还有别的部署在用这个镜像的话
+            会删不掉** —— 那不是错误，只记一条提示
         :raises DeployError: ``data/`` 删不掉
         """
         if self.runner.read_text(self.spec.compose_path, sudo=self.sudo) is None:
@@ -608,6 +618,24 @@ class Deployer:
         if purge_data:
             self.say(f"删除 {self.spec.data_dir} —— 登录态和 profile 一起没了")
             self._purge_data()
+        if purge_image:
+            self._purge_image()
+
+    def _purge_image(self) -> None:
+        """删镜像。**删不掉不算失败** —— 多半是同机别的容器还在用它。
+
+        不加 ``--force``：强删会把还在跑的那个部署的镜像层抽走，症状是它下次重启
+        起不来，而现场早就不在了。
+        """
+        self.say(f"删除镜像 {self.spec.image}")
+        result = self.mutate(["docker", "image", "rm", self.spec.image], check=False)
+        if result.ok:
+            return
+        detail = (result.err or result.out).strip().splitlines()
+        self.say(
+            f"镜像没删掉（{detail[-1] if detail else '无输出'}）—— 同机多半还有别的容器"
+            f"在用它。要强删自己来：docker image rm -f {self.spec.image}"
+        )
 
     def _purge_data(self) -> None:
         """删 ``data/``。
