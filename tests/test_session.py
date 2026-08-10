@@ -28,7 +28,7 @@ from sleight.core.errors import (
 )
 from sleight.core.protocol import Event
 from sleight.core.session import Session
-from sleight.core.types import Gone, Load, NetworkIdle, Selector, Text
+from sleight.core.types import DomReady, Gone, Load, NetworkIdle, Selector, Text
 
 SID = "S1"
 TID = "T1"
@@ -1070,6 +1070,41 @@ def test_a_subframe_navigation_does_not_steal_the_epoch():
 
     s.reload()
     assert s._loader_id == "L2"
+
+
+def test_a_click_initiated_navigation_rebinds_the_epoch():
+    """点击链接 / 提交表单触发的导航，走不到 _renavigate —— 纪元跟踪必须是常驻的。
+
+    否则新文档的 frameNavigated 不换纪元，随后它自己的 DOMContentLoaded 因 loaderId
+    对不上被 _handle 丢掉，而 _lifecycle 里上一页残留的 DOMContentLoaded 又原样留着。
+    这里模拟 click 之后新文档的提交事件已经到达缓冲区（Chrome 发得很快），wait 的第一
+    次 drain 就会处理它们。
+    """
+    s, t = build()
+    land_on(s, t, "https://a.example/")             # 纪元 L1，_lifecycle 里有 L1 的 DOMContentLoaded
+    assert s._loader_id == "L1"
+    assert "DOMContentLoaded" in s._lifecycle
+
+    # click 触发导航：顶层 frame 换文档，新文档的 DOMContentLoaded 随后到达
+    t.emit("Page.frameNavigated", {"frame": {"id": "F1", "loaderId": "L2"}})
+    t.lifecycle("DOMContentLoaded", "L2")
+
+    s.wait(DomReady(), timeout=2)
+    assert s._loader_id == "L2", "click 导航没有换纪元"
+
+
+def test_domready_is_not_satisfied_by_stale_lifecycle_after_a_click_navigation():
+    """强化版：新文档已提交、但它自己的 DOMContentLoaded 还没来时，DomReady 不能被
+    上一页的残留状态满足。"""
+    s, t = build()
+    land_on(s, t, "https://a.example/")
+    assert "DOMContentLoaded" in s._lifecycle             # 上一页的残留
+
+    # 只提交新文档（换 loaderId），但不发它自己的 DOMContentLoaded
+    t.emit("Page.frameNavigated", {"frame": {"id": "F1", "loaderId": "L2"}})
+    with pytest.raises(TimeoutError):
+        s.wait(DomReady(), timeout=0.2)
+    assert s._loader_id == "L2", "新文档提交后纪元应已切到 L2"
 
 
 def test_back_and_forward_walk_the_history():

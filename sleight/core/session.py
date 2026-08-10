@@ -278,11 +278,45 @@ class Session:
         for ev in self._t.drain_events(self._sid):
             self._handle(ev)
 
+    def _is_root_frame(self, frame: dict[str, Any]) -> bool:
+        """这条 ``frameNavigated`` 说的是不是本会话的顶层 frame。
+
+        子 frame 带 ``parentId``，直接排除；否则回落到 id 比对。首次导航前
+        ``_frame_id`` 还是 ``None``，此时任何顶层 frame 都认作根，用来完成 bootstrap。
+        """
+        if frame.get("parentId"):
+            return False
+        return self._frame_id is None or frame.get("id") == self._frame_id
+
+    def _rebind(self, loader: str, frame_id: str | None) -> None:
+        """换导航纪元：绑新 loaderId、清生命周期、重置网络空闲。
+
+        以前这段逻辑只活在 :meth:`_renavigate` 的闭包里，于是**只有** open/reload/
+        back/forward 会换纪元。``click()`` 触发的导航（点链接、提交表单）走不到这里，
+        结果是：新文档的 lifecycle 事件因 loaderId 对不上被 :meth:`_handle` 丢掉，
+        而上一页残留的 ``DOMContentLoaded`` 又让 :meth:`wait` 秒过 —— ``wait`` 既假
+        成功又永远等不到真信号。把它提成常驻方法、并在 :meth:`_handle` 里对根 frame
+        的 ``frameNavigated`` 持续调用，纪元才对任何来源的导航都成立。
+        """
+        self._loader_id = loader
+        if frame_id is not None:
+            self._frame_id = frame_id
+        self._lifecycle.clear()
+        self._netidle.reset(frame_id=self._frame_id)
+
     def _handle(self, ev: Event) -> None:
         if ev.method == "Page.lifecycleEvent":
             # loaderId 绑定就是导航纪元 —— 上一次导航的 load 事件在这里被丢掉
             if self._loader_id is None or ev.params.get("loaderId") == self._loader_id:
                 self._lifecycle.add(ev.params.get("name", ""))
+        elif ev.method == "Page.frameNavigated":
+            # 常驻纪元跟踪：任何来源的顶层导航（尤其 click 触发的）都要换纪元，
+            # 不能只在 _renavigate 里换。带新 loaderId 的根 frame 提交才算数 ——
+            # 子 frame 和同一 loaderId 的重复事件都不动纪元。
+            frame = ev.params.get("frame") or {}
+            loader = frame.get("loaderId") or ""
+            if loader and loader != self._loader_id and self._is_root_frame(frame):
+                self._rebind(loader, frame.get("id"))
         elif ev.method.startswith("Network."):
             self._netidle.feed(ev)
 
@@ -441,21 +475,15 @@ class Session:
         """
         committed: list[str] = []
 
-        def rebind(loader: str, frame_id: str | None) -> None:
-            committed.append(loader)
-            self._loader_id = loader
-            if frame_id is not None:
-                self._frame_id = frame_id
-            self._lifecycle.clear()
-            self._netidle.reset(frame_id=self._frame_id)
-
         def commit(ev: Event) -> None:
+            # 纪元切换由常驻的 _handle → _rebind 负责；这里只**记录**本次导航是否已
+            # 提交，供下面的等待逻辑判断。避免两处各换一次纪元。
             if ev.method != "Page.frameNavigated":
                 return
             frame = ev.params.get("frame") or {}
-            if self._frame_id is not None and frame.get("id") != self._frame_id:
-                return                                  # 子 frame 的导航不算
-            rebind(frame.get("loaderId") or "", frame.get("id"))
+            loader = frame.get("loaderId") or ""
+            if loader and self._is_root_frame(frame):
+                committed.append(loader)
 
         self.drain()                                    # 发命令之前先清一遍
         with self.observe_events(commit):
@@ -477,9 +505,13 @@ class Session:
             # 紧接着的 drain() 又把它们塞回去，NetworkIdle 会等一批永远不结束的旧请求。
             self.drain()
 
-            # 观察者已经从事件里认到更新的提交时，别用响应里那个旧的覆盖回去
+            # 观察者已经从事件里认到更新的提交时，别用响应里那个旧的覆盖回去。
+            # 有些命令（Page.navigate）在响应里直接给 loaderId 且不再发 frameNavigated
+            # 事件，只能从响应换纪元；此时也要手动记一笔 committed，否则下面的等待循环
+            # 会空转到超时。
             if loader is not None and not committed:
-                rebind(loader, result.get("frameId"))
+                self._rebind(loader, result.get("frameId"))
+                committed.append(loader)
 
             self.drain()                                # 新纪元的早到事件
 
