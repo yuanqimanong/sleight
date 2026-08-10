@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from .element import Element, ElementLike
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
-from .frames import FrameInfo, FrameView
+from .frames import FrameElement, FrameInfo, FrameView
 from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
@@ -869,6 +869,42 @@ class Session:
                 return FrameView(self, f, self._frame_contexts[f.frame_id])
         have = [f.name or f.url or f.frame_id for f in candidates]
         raise SleightError(f"no frame matches {match!r}; child frames: {have or 'none'}")
+
+    def frame_element(
+        self, iframe_selector: str, selector: str, index: int = 0
+    ) -> FrameElement:
+        """定位一个**同源 iframe 内**的元素，返回可直接交互的 :class:`FrameElement`。
+
+        它满足 :class:`~sleight.core.element.ElementLike`，可以直接喂给 :meth:`click` /
+        :meth:`type` 等 —— 复用现有拟人轨迹和双重命中校验，几何自动换算到顶层 viewport。
+        这正是 README 里"够不到 iframe 里的滑块"要补的能力。
+
+        :param iframe_selector: 主 frame 里定位 ``<iframe>`` 的 CSS 选择器
+        :param selector: iframe **内**定位目标元素的 CSS 选择器
+        :param index: 同一选择器命中多个时取第几个
+        :raises SleightError: 选择器指的不是 iframe，或该 iframe 是跨源 OOPIF（尚不支持进入）
+        :raises ElementError: iframe 或目标元素不存在
+        """
+        iframe = self.require(iframe_selector)
+        object_id = iframe.object_id()
+        try:
+            node = self.call("DOM.describeNode", {"objectId": object_id})
+        finally:
+            self.call("Runtime.releaseObject", {"objectId": object_id})
+        frame_id = (node.get("node") or {}).get("frameId")
+        if not frame_id:
+            raise SleightError(f"{iframe_selector!r} is not an <iframe> (no frameId)")
+
+        context_id = self._frame_contexts.get(frame_id)
+        if context_id is None:
+            self.drain()                            # 上下文可能刚建、事件还没消费
+            context_id = self._frame_contexts.get(frame_id)
+        if context_id is None:
+            raise SleightError(
+                f"iframe {iframe_selector!r} is cross-origin (OOPIF) or not ready; "
+                "interacting inside it needs a separate CDP session, not implemented yet"
+            )
+        return FrameElement(self, iframe, context_id, selector, index)
 
     # ------------------------------------------------------------------ #
     # 交互

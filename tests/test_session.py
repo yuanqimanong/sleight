@@ -1184,6 +1184,86 @@ def test_execution_context_map_clears_on_navigation():
     assert s._frame_contexts == {}, "整页导航后旧的执行上下文映射必须清空"
 
 
+class _StubIframe:
+    """FrameElement 需要的父页 <iframe> Element 替身：只提供 js_ref 和 repr。"""
+
+    js_ref = "document.querySelectorAll('#cap')[0]"
+
+    def __repr__(self) -> str:
+        return "<iframe #cap>"
+
+
+class _StubSession:
+    """FrameElement 单测用的最小 Session：eval 走主上下文路由，_eval_in_context 走 frame
+    上下文路由，两者用不同的路由函数区分，好断言坐标换算与 transform 守卫。"""
+
+    def __init__(self, *, outer, inner, viewport=(1000, 800)) -> None:
+        self._outer = outer          # 主上下文 eval(expr) -> value
+        self._inner = inner          # frame 上下文 eval(expr) -> value
+        self._viewport = viewport
+
+    def eval(self, expr):
+        return self._outer(expr)
+
+    def _eval_in_context(self, context_id, expr):
+        assert context_id == 42, "frame 内求值必须用该 frame 的 contextId"
+        return self._inner(expr)
+
+    def viewport(self):
+        return self._viewport
+
+
+def _frame_element(*, outer, inner):
+    from sleight.core.frames import FrameElement
+    return FrameElement(_StubSession(outer=outer, inner=inner), _StubIframe(), 42, "#btn")
+
+
+def test_frame_element_translates_coordinates_to_the_top_viewport():
+    # iframe 内容区左上角在父页 (100, 50)；元素在 frame 内 (20, 10) → 顶层 (120, 60)
+    fe = _frame_element(
+        outer=lambda e: {"x": 100.0, "y": 50.0, "transformed": False},
+        inner=lambda e: {"x": 20.0, "y": 10.0, "w": 30.0, "h": 12.0},
+    )
+    box = fe.require_box()
+    assert (box.x, box.y, box.w, box.h) == (120.0, 60.0, 30.0, 12.0)
+
+
+def test_frame_element_refuses_when_the_iframe_is_transformed():
+    fe = _frame_element(
+        outer=lambda e: {"x": 100.0, "y": 50.0, "transformed": True},
+        inner=lambda e: {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+    )
+    with pytest.raises(ElementError, match="transform"):
+        fe.require_box()
+
+
+def test_frame_element_hit_test_is_two_level():
+    calls = {"outer": 0, "inner": 0}
+
+    def outer(expr):
+        calls["outer"] += 1
+        if "transformed" in expr:
+            return {"x": 100.0, "y": 50.0, "transformed": False}
+        return True                          # 父页那一点命中的确实是 iframe
+
+    def inner(expr):
+        calls["inner"] += 1
+        return True                          # frame 内命中目标元素
+
+    fe = _frame_element(outer=outer, inner=inner)
+    fe.require_hit(130, 70, when="test")     # 不抛即通过
+    assert calls["outer"] >= 2 and calls["inner"] >= 1, "父页和 frame 内都要各查一次"
+
+
+def test_frame_element_hit_test_fails_when_something_covers_the_iframe():
+    fe = _frame_element(
+        outer=lambda e: {"x": 100.0, "y": 50.0, "transformed": False} if "transformed" in e else False,
+        inner=lambda e: True,
+    )
+    with pytest.raises(ElementError, match="not over its iframe"):
+        fe.require_hit(130, 70, when="test")
+
+
 def test_back_and_forward_walk_the_history():
     s, t = build()
     t.results["Page.getNavigationHistory"] = HISTORY

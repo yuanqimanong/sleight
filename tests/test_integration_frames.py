@@ -59,6 +59,53 @@ def test_frames_sees_a_same_origin_iframe_and_marks_it_reachable(live_session):
         assert live_session.query("#inner") is None
 
 
+def test_click_lands_a_trusted_event_inside_a_same_origin_iframe(live_session):
+    """README 说'够不到 iframe 里的滑块'——这里证明现在够得到：真实点击落在 iframe 内的
+    按钮上，且 isTrusted=true，坐标经过跨 frame 换算（iframe 有 border+padding）。"""
+    pages = {
+        "child.html": (
+            "<!doctype html><title>C</title>"
+            "<button id=btn style='margin:60px 40px' "
+            "onclick='window.__clicked = event.isTrusted'>Slider</button>"
+        ),
+        "parent.html": (
+            "<!doctype html><title>P</title><h1>Parent</h1>"
+            "<div style='height:30px'></div>"
+            "<iframe id=cap src='child.html' "
+            "style='width:400px;height:250px;border:2px solid black;padding:5px'></iframe>"
+        ),
+    }
+    with serve_pages(pages) as d:
+        live_session.open(f"file://{d}/parent.html", wait=Text("Parent"))
+        live_session.pump_events(0.5)
+
+        target = live_session.frame_element("#cap", "#btn")
+        assert target.exists()
+        live_session.click(target)                       # 走现有拟人/命中校验输入链
+
+        landed = live_session.frame("cap").eval("window.__clicked")
+        assert landed is True, "iframe 内的按钮没有收到可信点击"
+
+
+def test_click_into_a_transformed_iframe_refuses_rather_than_mispoints(live_session):
+    """iframe 带 CSS transform 时线性坐标换算会算错落点 —— 必须显式报错，绝不硬点。"""
+    pages = {
+        "child.html": "<!doctype html><title>C</title><button id=btn>x</button>",
+        "parent.html": (
+            "<!doctype html><title>P</title><h1>Parent</h1>"
+            "<iframe id=cap src='child.html' "
+            "style='width:300px;height:200px;transform:scale(1.2) rotate(3deg)'></iframe>"
+        ),
+    }
+    with serve_pages(pages) as d:
+        live_session.open(f"file://{d}/parent.html", wait=Text("Parent"))
+        live_session.pump_events(0.5)
+
+        target = live_session.frame_element("#cap", "#btn")
+        with pytest.raises(SleightError, match="transform"):
+            live_session.click(target)
+
+
 def test_frame_lookup_miss_lists_available_child_frames(live_session):
     """找不到的 frame 要显式报错，并把有哪些子 frame 列出来帮定位。"""
     pages = {
