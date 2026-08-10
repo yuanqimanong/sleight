@@ -1459,6 +1459,75 @@ def _walk(node):
         yield from _walk(c)
 
 
+# --------------------------------------------------------------------------- #
+# 四工具 Gateway
+# --------------------------------------------------------------------------- #
+
+
+def _gateway(**kw):
+    from sleight.agent import Gateway
+    s, t = build()
+    return Gateway(s, **kw), s, t
+
+
+def test_gateway_validates_actions_and_required_params():
+    g, _, _ = _gateway()
+    assert not g.session("teleport")                 # 未知 action
+    assert not g.session("open")                     # 缺 url
+    assert not g.act("frobnicate")                   # 未知 action
+    assert not g.act("click")                        # 既无 ref 也无 coordinate
+    assert not g.act("press")                        # 缺 key
+    assert not g.act("type", coordinate=(1, 1))      # 缺 text
+    r = g.act("click")
+    assert r.error and "ref or a coordinate" in r.error
+
+
+def test_gateway_observe_snapshot_and_find():
+    g, _, t = _gateway()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    snap = g.observe("snapshot")
+    assert snap.ok and set(snap.data["refs"]) == {"e1", "e2"}
+    assert 'button "Go"' in snap.data["snapshot"]
+
+    hits = g.find("go")                              # 按 name 子串
+    assert [m["role"] for m in hits.data["matches"]] == ["button"]
+    typed = g.find("", role="textbox")              # 只按 role
+    assert typed.data["matches"][0]["ref"] == "e2"
+
+
+def test_gateway_ref_errors_are_structured():
+    g, _, t = _gateway()
+    # 没快照就用 ref
+    assert "no snapshot" in g.act("click", ref="e1").error
+    # 未知 ref
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    g.observe("snapshot")
+    assert "unknown ref" in g.act("click", ref="e999").error
+
+
+def test_gateway_raw_eval_is_gated():
+    g, _, _ = _gateway()
+    assert not g.eval("1+1"), "默认关，页面内容永远开不了它"
+    g2, _, t2 = _gateway(allow_raw=True)
+    t2.results["Runtime.evaluate"] = lambda p: {"result": {"value": 2}}
+    r = g2.eval("1+1")
+    assert r.ok and r.data["value"] == 2
+
+
+def test_gateway_extract_returns_structured_fields():
+    g, _, t = _gateway()
+    t.results["Runtime.evaluate"] = _extract_route(content_text="word " * 200)
+    r = g.extract()
+    assert r.ok and r.data["title"] == "T" and r.data["quality"] > 0
+
+
+def test_gateway_describe_lists_the_tool_surface():
+    g, _, _ = _gateway()
+    d = g.describe()
+    assert set(d) == {"session", "observe", "act", "extract"}
+    assert "find" in d["observe"] and "click" in d["act"]
+
+
 def test_back_and_forward_walk_the_history():
     s, t = build()
     t.results["Page.getNavigationHistory"] = HISTORY
