@@ -1163,10 +1163,44 @@ def test_frame_reads_into_a_same_origin_child_in_its_own_context():
     assert seen["contextId"] == 7, "读子 frame 必须落在它自己的 executionContextId 上"
 
 
-def test_frame_into_an_oopif_fails_loudly():
-    s, _ = _with_frames()
-    with pytest.raises(SleightError, match=r"cross-origin|OOPIF"):
+def test_frame_reads_into_an_oopif_via_an_attached_sub_session():
+    """跨源 OOPIF：frame() 自动 attach 出子 session，从子 session 读它的内容。"""
+    s, t = _with_frames()
+    t.results["Target.getTargets"] = {"targetInfos": [
+        {"type": "iframe", "targetId": "T-AD", "url": "https://other.example/ad"},
+    ]}
+    t.results["Target.attachToTarget"] = {"sessionId": "SUB-1"}
+    calls: list = []
+    def route(params):
+        calls.append(params.get("expression"))
+        return {"result": {"value": "ad-body"}}
+    t.results["Runtime.evaluate"] = route
+
+    view = s.frame("ad")
+    assert view.text() == "ad-body"
+    assert s._oopif_sessions.get("https://other.example/ad") == "SUB-1"
+    assert calls, "应通过子 session 对 OOPIF 求值"
+
+
+def test_oopif_attach_fails_loudly_when_no_target_matches():
+    s, _ = _with_frames()      # 没有路由 Target.getTargets → 没有可 attach 的 iframe target
+    with pytest.raises(SleightError, match="no cross-origin iframe target"):
         s.frame("ad")
+
+
+def test_close_detaches_oopif_sub_sessions():
+    s, t = _with_frames()
+    t.results["Target.getTargets"] = {"targetInfos": [
+        {"type": "iframe", "targetId": "T-AD", "url": "https://other.example/ad"},
+    ]}
+    t.results["Target.attachToTarget"] = {"sessionId": "SUB-1"}
+    t.results["Runtime.evaluate"] = lambda p: {"result": {"value": "x"}}
+    s.frame("ad").text()
+    assert "https://other.example/ad" in s._oopif_sessions
+
+    s.close()
+    detaches = [p for m, p, _ in t.calls if m == "Target.detachFromTarget"]
+    assert {"sessionId": "SUB-1"} in detaches, "close 必须 detach 掉 OOPIF 子 session"
 
 
 def test_frame_not_found_lists_children():
@@ -1234,8 +1268,9 @@ class _StubSession:
 
 
 def _frame_element(*, outer, inner):
-    from sleight.core.frames import FrameElement
-    return FrameElement(_StubSession(outer=outer, inner=inner), _StubIframe(), 42, "#btn")
+    from sleight.core.frames import FrameElement, _ContextScope
+    sess = _StubSession(outer=outer, inner=inner)
+    return FrameElement(sess, _StubIframe(), _ContextScope(sess, 42), "#btn")
 
 
 def test_frame_element_translates_coordinates_to_the_top_viewport():

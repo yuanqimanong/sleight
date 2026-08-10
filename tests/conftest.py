@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from typing import Any
 
@@ -378,6 +379,41 @@ def serve_pages(pages: dict[str, str]) -> Iterator[str]:
                 handle.write(html)
         yield directory
     finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@contextmanager
+def serve_http(pages: dict[str, str] | Callable[[int], dict[str, str]]) -> Iterator[int]:
+    """在 loopback 上起一个线程化 HTTP 服务，返回端口。用于构造**跨源 OOPIF**：
+
+    父页从 ``http://127.0.0.1:<port>`` 打开、iframe 指向 ``http://localhost:<port>`` —— 两个
+    host 在 Chromium 的站点隔离下算跨源，子 frame 因此进独立进程/独立 target（OOPIF）。
+
+    ``pages`` 可以是 ``{name: html}``，也可以是 ``port -> {name: html}`` 的函数 —— 页面要
+    在自己内容里引用端口（iframe src）时用后者，绕开"端口和页面互相依赖"的先后问题。
+    """
+    import http.server
+
+    port = _free_port()
+    built = pages(port) if callable(pages) else pages
+    directory = tempfile.mkdtemp(prefix="sleight-http-")
+    for name, html in built.items():
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write(html)
+
+    class _Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:  # 别把请求日志刷进测试输出
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(
+        ("0.0.0.0", port), functools.partial(_Quiet, directory=directory)
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
         shutil.rmtree(directory, ignore_errors=True)
 
 

@@ -31,6 +31,70 @@ if TYPE_CHECKING:
 __all__ = ["FrameElement", "FrameInfo", "FrameView"]
 
 
+class FrameScope:
+    """在某个 frame 的作用域里求值 + 解析节点句柄的统一入口。
+
+    两种实现把"同源子 frame"和"跨源 OOPIF"这两条完全不同的底层路径藏在同一接口后面，
+    :class:`FrameView` / :class:`FrameElement` 因此不必各写一遍。
+    """
+
+    def eval(self, expr: str) -> Any:                       # pragma: no cover - 接口
+        raise NotImplementedError
+
+    def resolve_object(self, js_ref: str) -> str:           # pragma: no cover - 接口
+        raise NotImplementedError
+
+
+class _ContextScope(FrameScope):
+    """同源/同进程子 frame：用它在主 session 里的 executionContextId 求值。"""
+
+    __slots__ = ("_context_id", "_session")
+
+    def __init__(self, session: Session, context_id: int) -> None:
+        self._session = session
+        self._context_id = context_id
+
+    def __repr__(self) -> str:
+        return f"ctx={self._context_id}"
+
+    def eval(self, expr: str) -> Any:
+        return self._session._eval_in_context(self._context_id, expr)
+
+    def resolve_object(self, js_ref: str) -> str:
+        # contextId 属于主 session 的 target，拿到的 objectId 主 session 的 DOM.* 能直接用
+        r = self._session.call("Runtime.evaluate", {
+            "expression": js_ref, "contextId": self._context_id, "returnByValue": False,
+        })
+        object_id = (r.get("result") or {}).get("objectId")
+        if not object_id:
+            raise ElementError("frame element could not be resolved to a live node")
+        return object_id
+
+
+class _SessionScope(FrameScope):
+    """跨源 OOPIF：用它自己 attach 出来的子 CDP session 求值。"""
+
+    __slots__ = ("_session", "_sid")
+
+    def __init__(self, session: Session, sid: str) -> None:
+        self._session = session
+        self._sid = sid
+
+    def __repr__(self) -> str:
+        return f"oopif-session={self._sid[:8]}"
+
+    def eval(self, expr: str) -> Any:
+        return self._session._eval_on_session(self._sid, expr)
+
+    def resolve_object(self, js_ref: str) -> str:
+        # 子 session 里的 objectId 主 session 的 DOM.scrollIntoViewIfNeeded 用不了；与其
+        # 悄悄滚错，不如显式拒绝。元素已经可见时根本走不到这里（in_viewport 为真就不滚）。
+        raise ElementError(
+            "scrolling to an element inside a cross-origin iframe is not supported yet; "
+            "make sure it is already in view"
+        )
+
+
 @dataclass(frozen=True)
 class FrameInfo:
     """frame 树里的一个节点。
@@ -53,31 +117,33 @@ class FrameInfo:
 
 
 class FrameView:
-    """一个**可达** frame 的只读视图 —— 在它自己的执行上下文里求值。
+    """一个 frame 的只读视图 —— 在它自己的作用域里求值。
+
+    作用域由一个 :class:`FrameScope` 提供：同源子 frame 用 executionContextId，跨源
+    OOPIF 用它自己那条 attach 出来的子 CDP session。视图这层不关心是哪种。
 
     不做写交互：那会经过坐标换算和命中校验，是 ``FrameElement`` 的职责。
     """
 
-    __slots__ = ("_context_id", "_session", "info")
+    __slots__ = ("_scope", "info")
 
-    def __init__(self, session: Session, info: FrameInfo, context_id: int) -> None:
-        self._session = session
+    def __init__(self, scope: FrameScope, info: FrameInfo) -> None:
+        self._scope = scope
         self.info = info
-        self._context_id = context_id
 
     def __repr__(self) -> str:
-        return f"<FrameView {self.info.name or self.info.url!r} ctx={self._context_id}>"
+        return f"<FrameView {self.info.name or self.info.url!r} via {self._scope!r}>"
 
     def eval(self, expr: str) -> Any:
-        """在**本 frame** 的执行上下文里求值，返回 by-value 结果。
+        """在**本 frame** 的作用域里求值，返回 by-value 结果。
 
         和 :meth:`Session.eval` 一样只能**读** DOM —— 写交互会产生 ``isTrusted=false``
         的假事件。拼用户输入务必用 ``json.dumps`` 转义。
 
         :param expr: JS 表达式
-        :raises ProtocolError: JS 抛异常，或该 frame 的上下文已失效
+        :raises ProtocolError: JS 抛异常，或该 frame 的作用域已失效
         """
-        return self._session._eval_in_context(self._context_id, expr)
+        return self._scope.eval(expr)
 
     def text(self) -> str:
         """``document.body.innerText`` —— 该 frame 的可见文本。"""
@@ -99,26 +165,29 @@ class FrameElement:
     只认顶层坐标）；命中校验做**两级**：先在父页确认那一点命中的是这个 iframe，再进
     frame 内确认命中的是目标元素。这样才不会像裸坐标那样"点了没反应"还不报错。
 
+    支持**同源子 frame**（通过 executionContextId）和**跨源 OOPIF**（通过它自己那条子
+    session）—— 由传入的 :class:`FrameScope` 决定，本类不关心。输入永远从顶层 session 发，
+    坐标换算相同。
+
     边界（有意为之、显式失败而非静默误点）：
 
-    - 只支持**单层同源** iframe。跨源 OOPIF 由 :meth:`Session.frame_element` 在构造前
-      就挡掉。
+    - 只支持**单层** iframe（父页里一个 ``<iframe>``）。
     - iframe 或其任一祖先带 CSS ``transform`` 时，"父页坐标 + frame 内坐标"这套线性相加
       在旋转/缩放下会算错落点 —— 这里检测到 transform 直接抛，绝不硬点。
-    - frame 内滚动只在直通路径（``human=False`` → ``DOM.scrollIntoViewIfNeeded``）下可靠；
-      拟人滚动打的是顶层滚轮，不保证滚动的是 frame，因此元素不在 frame 视口内时命中校验
-      会失败并报错，而不是点错地方。
+    - frame 内滚动：同源用直通路径（``DOM.scrollIntoViewIfNeeded``）可靠；OOPIF 的 objectId
+      顶层用不了，直接拒绝滚动。两种情况下元素不在 frame 视口内都会命中校验失败并报错，
+      而不是点错地方。
     """
 
-    __slots__ = ("_context_id", "_iframe", "_session", "index", "selector")
+    __slots__ = ("_iframe", "_scope", "_session", "index", "selector")
 
     def __init__(
-        self, session: Session, iframe: Element, context_id: int,
+        self, session: Session, iframe: Element, scope: FrameScope,
         selector: str, index: int = 0,
     ) -> None:
         self._session = session
         self._iframe = iframe            # 父页里的 <iframe> Element
-        self._context_id = context_id    # iframe 内文档的默认世界执行上下文
+        self._scope = scope              # 目标 frame 的作用域（同源上下文 / OOPIF 子 session）
         self.selector = selector
         self.index = index
 
@@ -133,9 +202,8 @@ class FrameElement:
         return f"document.querySelectorAll({json.dumps(self.selector)})[{self.index}]"
 
     def _inner(self, body: str) -> Any:
-        return self._session._eval_in_context(
-            self._context_id,
-            f"(() => {{ const el = {self._js_ref}; if (!el) return null; {body} }})()",
+        return self._scope.eval(
+            f"(() => {{ const el = {self._js_ref}; if (!el) return null; {body} }})()"
         )
 
     def _frame_offset(self) -> dict[str, Any] | None:
@@ -239,10 +307,6 @@ class FrameElement:
             raise ElementError(f"{self!r} does not have focus {after} — is it focusable?")
 
     def object_id(self) -> str:
-        r = self._session.call("Runtime.evaluate", {
-            "expression": self._js_ref, "contextId": self._context_id, "returnByValue": False,
-        })
-        object_id = (r.get("result") or {}).get("objectId")
-        if not object_id:
-            raise ElementError(f"{self!r} could not be resolved to a live node")
-        return object_id
+        # 只在直通路径滚动时会被调到（元素不在视口内）。同源能给出主 session 可用的
+        # objectId；OOPIF 会显式拒绝，见 _SessionScope.resolve_object。
+        return self._scope.resolve_object(self._js_ref)

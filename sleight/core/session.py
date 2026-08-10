@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from .element import Element, ElementLike
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
-from .frames import FrameElement, FrameInfo, FrameView
+from .frames import FrameElement, FrameInfo, FrameView, _ContextScope, _SessionScope
 from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
@@ -159,6 +159,8 @@ class Session:
         # frameId -> 该 frame 默认(主)世界的 executionContextId。靠 Runtime.enable 送来的
         # executionContextCreated 事件维护，用于在同源子 frame 的上下文里求值。
         self._frame_contexts: dict[str, int] = {}
+        # 跨源 OOPIF 的 url -> attach 出来的子 CDP sessionId。懒建、缓存，close 时统一 detach。
+        self._oopif_sessions: dict[str, str] = {}
         self._netidle = NetworkIdleTracker()
         self._track_network = track_network
         # 事件观察者。有了它就不必去 monkeypatch _handle —— 那是私有方法，而且补丁
@@ -736,6 +738,22 @@ class Session:
             raise ProtocolError(f"JS exception: {desc}")
         return (r.get("result") or {}).get("value")
 
+    def _eval_on_session(self, session_id: str, expr: str) -> Any:
+        """在**另一条 CDP session**（OOPIF 子 target）里求值。
+
+        跨源 OOPIF 在独立进程/独立 target，主 session 的 contextId 够不着它；attach 出
+        它自己的 session 后，直接在那条 session 上 evaluate 即落在它的主世界。
+        """
+        r = self._t.call(
+            "Runtime.evaluate",
+            {"expression": expr, "returnByValue": True, "awaitPromise": True},
+            session_id=session_id,
+        )
+        if details := r.get("exceptionDetails"):
+            desc = (details.get("exception") or {}).get("description") or details.get("text")
+            raise ProtocolError(f"JS exception: {desc}")
+        return (r.get("result") or {}).get("value")
+
     def content(self) -> str:
         """渲染后的 ``document.documentElement.outerHTML``。"""
         return self.eval("document.documentElement.outerHTML") or ""
@@ -832,32 +850,41 @@ class Session:
     # ------------------------------------------------------------------ #
     # Frame
     #
-    # query/query_all/Element 只看主 frame 的普通 DOM。下面这层单独把 frame 树暴露出来，
-    # 并支持读进**同源/同进程**子 frame。跨源 OOPIF 会出现在树里但标 reachable=False，
-    # 读它要另开 CDP session（下一步），现在明确 fail，不静默返回空。
+    # query/query_all/Element 只看主 frame 的普通 DOM。下面这层把 frame 树暴露出来，并
+    # 支持读进、点进子 frame：
+    #   - 同源/同进程子 frame：走它在主 session 里的 executionContextId；
+    #   - 跨源 OOPIF：另一个进程、另一个 target，attach 出它自己的子 CDP session 再操作。
+    # OOPIF 在主 target 的 Page.getFrameTree 里可能只留一个空 url 占位（甚至不出现），所以
+    # 枚举时还要并入 Target.getTargets 里 type=="iframe" 的目标，才靠得住。
     # ------------------------------------------------------------------ #
 
     def frames(self) -> list[FrameInfo]:
-        """列出本 target 的整棵 frame 树（含主 frame）。
+        """列出本 target 的 frame（含主 frame、同源子 frame 和跨源 OOPIF）。
 
         每个 :class:`~sleight.core.frames.FrameInfo` 标了 ``reachable``：同源/同进程子
-        frame 为 ``True``（可用 :meth:`frame` 读进去），跨源 OOPIF 为 ``False``。
+        frame 为 ``True``（主 session 直接有它的执行上下文）；跨源 OOPIF 为 ``False``
+        （出现在列表里、可被 :meth:`frame` 通过子 session 读入，但不在主 session 上下文里）。
 
-        :returns: 深度优先顺序的 frame 列表，主 frame 在最前
+        :returns: frame 列表，主 frame 在最前
         """
         self.drain()                    # 把已到的 executionContextCreated 收进映射
         tree = self.call("Page.getFrameTree").get("frameTree") or {}
         out: list[FrameInfo] = []
+        seen_urls: set[str] = set()
+        main_id: str | None = None
 
         def walk(node: dict[str, Any], parent_id: str | None) -> None:
+            nonlocal main_id
             frame = node.get("frame") or {}
             fid = frame.get("id") or ""
+            url = frame.get("url") or ""
+            if parent_id is None:
+                main_id = fid
+            if url:
+                seen_urls.add(url)
             out.append(FrameInfo(
-                frame_id=fid,
-                url=frame.get("url") or "",
-                name=frame.get("name"),
-                parent_id=parent_id,
-                is_main=parent_id is None,
+                frame_id=fid, url=url, name=frame.get("name"),
+                parent_id=parent_id, is_main=parent_id is None,
                 # 主 frame 天然可达；子 frame 看有没有它的执行上下文（同源才有）
                 reachable=parent_id is None or fid in self._frame_contexts,
             ))
@@ -865,39 +892,81 @@ class Session:
                 walk(child, fid)
 
         walk(tree, None)
+
+        # 并入 OOPIF：getFrameTree 常常看不全跨源子 frame，Target.getTargets 才有它们的
+        # 真实 url。已经在树里（按 url 去重）的不重复列。
+        for target in self.call("Target.getTargets").get("targetInfos") or []:
+            if target.get("type") != "iframe":
+                continue
+            url = target.get("url") or ""
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            out.append(FrameInfo(
+                frame_id=target.get("targetId") or "", url=url, name=None,
+                parent_id=main_id, is_main=False, reachable=False,
+            ))
         return out
 
+    def _attach_oopif(self, url: str) -> str:
+        """attach 到某个跨源 iframe target（按 url 唯一匹配），返回它的子 sessionId。
+
+        懒建、缓存；:meth:`close` 时统一 detach。
+
+        :raises SleightError: 没有匹配的 iframe target，或有多个同 url 无法区分
+        """
+        if url in self._oopif_sessions:
+            return self._oopif_sessions[url]
+        matches = [
+            t for t in self.call("Target.getTargets").get("targetInfos") or []
+            if t.get("type") == "iframe" and t.get("url") == url
+        ]
+        if not matches:
+            raise SleightError(f"no cross-origin iframe target with url {url!r}")
+        if len(matches) > 1:
+            raise SleightError(f"ambiguous: {len(matches)} iframe targets share url {url!r}")
+        sid = self.call(
+            "Target.attachToTarget", {"targetId": matches[0]["targetId"], "flatten": True}
+        )["sessionId"]
+        self._t.call("Runtime.enable", session_id=sid)     # 让它建默认世界，供 evaluate
+        self._oopif_sessions[url] = sid
+        return sid
+
+    def _frame_scope(self, info: FrameInfo) -> _ContextScope | _SessionScope:
+        if info.reachable:
+            return _ContextScope(self, self._frame_contexts[info.frame_id])
+        if not info.url:
+            raise SleightError(f"cross-origin frame {info.frame_id!r} has no url to attach to")
+        return _SessionScope(self, self._attach_oopif(info.url))
+
     def frame(self, match: str) -> FrameView:
-        """按 frameId / name / URL 子串定位一个**可达**子 frame，返回只读视图。
+        """按 frameId / name / URL 子串定位一个子 frame，返回只读视图。
+
+        同源子 frame 直接读；跨源 OOPIF 会自动 attach 出子 session 再读。
 
         :param match: 精确 frameId、精确 ``name``，或出现在该 frame URL 里的子串
-        :raises SleightError: 没有匹配的 frame，或匹配到的是跨源 OOPIF（尚不支持读入）
+        :raises SleightError: 没有匹配的 frame，或 OOPIF 无法 attach
         """
         candidates = [f for f in self.frames() if not f.is_main]
         for f in candidates:
             if match == f.frame_id or match == f.name or (f.url and match in f.url):
-                if not f.reachable:
-                    raise SleightError(
-                        f"frame {match!r} is cross-origin (OOPIF); reading into it needs a "
-                        "separate CDP session, which is not implemented yet"
-                    )
-                return FrameView(self, f, self._frame_contexts[f.frame_id])
+                return FrameView(self._frame_scope(f), f)
         have = [f.name or f.url or f.frame_id for f in candidates]
         raise SleightError(f"no frame matches {match!r}; child frames: {have or 'none'}")
 
     def frame_element(
         self, iframe_selector: str, selector: str, index: int = 0
     ) -> FrameElement:
-        """定位一个**同源 iframe 内**的元素，返回可直接交互的 :class:`FrameElement`。
+        """定位一个 **iframe 内**的元素，返回可直接交互的 :class:`FrameElement`。
 
-        它满足 :class:`~sleight.core.element.ElementLike`，可以直接喂给 :meth:`click` /
-        :meth:`type` 等 —— 复用现有拟人轨迹和双重命中校验，几何自动换算到顶层 viewport。
-        这正是 README 里"够不到 iframe 里的滑块"要补的能力。
+        同源和跨源 OOPIF 都支持。返回值满足 :class:`~sleight.core.element.ElementLike`，
+        可直接喂给 :meth:`click` / :meth:`type` —— 复用现有拟人轨迹和双重命中校验，几何
+        自动换算到顶层 viewport。这正是 README 里"够不到 iframe 里的滑块"要补的能力。
 
         :param iframe_selector: 主 frame 里定位 ``<iframe>`` 的 CSS 选择器
         :param selector: iframe **内**定位目标元素的 CSS 选择器
         :param index: 同一选择器命中多个时取第几个
-        :raises SleightError: 选择器指的不是 iframe，或该 iframe 是跨源 OOPIF（尚不支持进入）
+        :raises SleightError: 选择器指的不是 iframe，或跨源 target 无法 attach
         :raises ElementError: iframe 或目标元素不存在
         """
         iframe = self.require(iframe_selector)
@@ -912,14 +981,20 @@ class Session:
 
         context_id = self._frame_contexts.get(frame_id)
         if context_id is None:
-            self.drain()                            # 上下文可能刚建、事件还没消费
+            self.drain()                            # 同源上下文可能刚建、事件还没消费
             context_id = self._frame_contexts.get(frame_id)
-        if context_id is None:
-            raise SleightError(
-                f"iframe {iframe_selector!r} is cross-origin (OOPIF) or not ready; "
-                "interacting inside it needs a separate CDP session, not implemented yet"
-            )
-        return FrameElement(self, iframe, context_id, selector, index)
+
+        if context_id is not None:
+            scope: _ContextScope | _SessionScope = _ContextScope(self, context_id)
+        else:
+            # 跨源 OOPIF：按 <iframe> 的 src 匹配它的 target 并 attach
+            src = self.eval(f"(() => {{ const f = {iframe.js_ref}; return f ? f.src : null; }})()")
+            if not src:
+                raise SleightError(
+                    f"iframe {iframe_selector!r} is cross-origin and its src could not be read"
+                )
+            scope = _SessionScope(self, self._attach_oopif(src))
+        return FrameElement(self, iframe, scope, selector, index)
 
     # ------------------------------------------------------------------ #
     # 交互
@@ -1492,6 +1567,13 @@ class Session:
         if self._closed:
             return
         self._closed = True
+        # 先 detach 掉为 OOPIF attach 出来的子 session，免得泄漏
+        for sid in self._oopif_sessions.values():
+            try:
+                self._t.call("Target.detachFromTarget", {"sessionId": sid})
+            except SleightError:
+                log.debug("error detaching oopif session %s", sid, exc_info=True)
+        self._oopif_sessions.clear()
         try:
             if self._owned:
                 self._t.call("Target.closeTarget", {"targetId": self._target_id})
