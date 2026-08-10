@@ -238,6 +238,7 @@ class Transport:
         :raises ProtocolError: 其中某条命令报错了，消息里带方法名
         :raises TimeoutError: 超时，消息里列出还在飞的方法名
         """
+        self._check_thread()
         deadline = time.monotonic() + timeout
         while self._inflight:
             if (remaining := deadline - time.monotonic()) <= 0:
@@ -277,6 +278,7 @@ class Transport:
         :param session_id: 要取哪一桶。``None`` 是浏览器级事件那一桶
         :returns: 迭代器，产出后即从缓冲中移除
         """
+        self._check_thread()
         if (bucket := self._events.get(session_id)) is None:
             return
         while bucket:
@@ -289,6 +291,7 @@ class Transport:
         :param timeout: 最多阻塞多久，秒
         :returns: 读到了返回 True，超时返回 False（不抛）
         """
+        self._check_thread()
         try:
             self._read_one(timeout=timeout)
         except TimeoutError:
@@ -329,6 +332,10 @@ class Transport:
         self._abandoned.add(msg_id)
 
     def _read_one(self, *, timeout: float) -> None:
+        # 读路径也要认线程。写路径（send_no_wait）早就查了，但 flush/pump/drain_events
+        # 以前不查 —— 于是两个线程可以同时 recv 同一个 socket，得到的是静默错帧，正是
+        # 类注释里说"极难排查"的那种 bug。close(severed=True) 仍可跨线程，不走这里。
+        self._check_thread()
         self._check_open()
         self._ws.settimeout(max(timeout, 0.001))
         try:

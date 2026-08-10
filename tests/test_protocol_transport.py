@@ -232,21 +232,32 @@ def test_severed_transport_reports_lease_lost_not_connection_error():
 
 
 def test_transport_rejects_cross_thread_use():
-    """静默错帧极难排查，宁可直接报错。"""
+    """静默错帧极难排查，宁可直接报错。
+
+    写路径（send_no_wait）和读路径（flush / pump / drain_events）都必须认线程 ——
+    两个线程同时 recv 同一个 socket 得到的是静默错帧。
+    """
     t = Transport(FakeWS())
-    boom: list[BaseException] = []
 
-    def other() -> None:
-        try:
-            t.send_no_wait("Page.enable")
-        except BaseException as exc:
-            boom.append(exc)
+    for op in (
+        lambda: t.send_no_wait("Page.enable"),
+        lambda: t.flush(timeout=0.05),
+        lambda: t.pump(timeout=0.01),
+        lambda: list(t.drain_events()),
+    ):
+        boom: list[BaseException] = []
 
-    th = threading.Thread(target=other)
-    th.start()
-    th.join()
-    assert boom and isinstance(boom[0], RuntimeError)
-    assert "not thread-safe" in str(boom[0])
+        def other(op=op) -> None:
+            try:
+                op()
+            except BaseException as exc:
+                boom.append(exc)
+
+        th = threading.Thread(target=other)
+        th.start()
+        th.join()
+        assert boom and isinstance(boom[0], RuntimeError), f"{op} 没有拒绝跨线程调用"
+        assert "not thread-safe" in str(boom[0])
 
 
 def test_close_is_idempotent_and_allowed_from_any_thread():
