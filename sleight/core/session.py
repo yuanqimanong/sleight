@@ -1017,17 +1017,22 @@ class Session:
     # Snapshot / Ref —— 给 LLM 看的无障碍树 + 可交互元素的稳定 Ref
     # ------------------------------------------------------------------ #
 
-    def snapshot(self, *, max_depth: int | None = None) -> Snapshot:
-        """抓一份**主 frame** 的无障碍快照，给可交互元素分配稳定、可校验的 Ref。
+    def snapshot(self, *, max_depth: int | None = None, cross_frame: bool = True) -> Snapshot:
+        """抓一份无障碍快照，给可交互元素分配稳定、可校验的 Ref。
 
         典型用法：把 ``snapshot().text()`` 喂给 LLM，LLM 挑一个 Ref，再
         ``session.click(snap.ref("e5"))`` —— Ref 解析出的元素满足 ElementLike，直接复用
         现有拟人轨迹与双重命中校验，产生真实（``isTrusted=true``）输入。
 
+        默认 ``cross_frame=True``：**同进程子 frame**（同源 iframe）的内容会直接合并进来，
+        iframe 节点下就是它内部的可交互元素，Ref 照样能点，不用手动切 frame。跨源 OOPIF
+        在别的进程，本快照不合并（用 :meth:`frame_element` 进它）。
+
         Ref 绑定当前导航纪元：同一节点跨多次 snapshot 拿到同一个 Ref；页面导航后旧 Ref
         失效（:meth:`Snapshot.ref` 抛 :class:`~sleight.core.errors.StaleRef`），不静默误点。
 
-        :param max_depth: 树的最大深度，``None`` 不限。深页可用它压上下文
+        :param max_depth: 树的最大深度（含下钻进 frame 的深度），``None`` 不限
+        :param cross_frame: 是否合并同进程子 frame，默认合并
         :returns: :class:`~sleight.core.snapshot.Snapshot`
         """
         self.drain()
@@ -1043,7 +1048,9 @@ class Session:
                 self._ref_registry[key] = ref
             return ref
 
-        return build_snapshot(self, nodes, generation, ref_for=ref_for, max_depth=max_depth)
+        return build_snapshot(
+            self, nodes, generation, ref_for=ref_for, max_depth=max_depth, cross_frame=cross_frame
+        )
 
     # ------------------------------------------------------------------ #
     # 交互

@@ -23,8 +23,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .element import composed_hit_body
-from .errors import ElementError, ProtocolError, StaleRef
+from .errors import ElementError, ProtocolError, SleightError, StaleRef
 from .types import Box
 
 if TYPE_CHECKING:
@@ -208,9 +207,57 @@ class BackendElement:
         return box.x < vw and box.y < vh and box.x + box.w > 0 and box.y + box.h > 0
 
     def require_hit(self, x: int, y: int, *, when: str) -> None:
-        fn = f"function(px, py) {{ const el = this; {composed_hit_body('px', 'py')} }}"
-        if not self._call(fn, (x, y)):
-            raise ElementError(f"{self!r} is covered at ({x}, {y}) {when}")
+        # 用 DOM.getNodeForLocation：它原生穿透**同进程 iframe 和 shadow DOM**，直接返回该点
+        # 最上层节点的 backendNodeId —— 比在某个文档里跑 elementFromPoint 更省事也更正确
+        # （合并快照里 iframe 内元素的坐标是顶层坐标，用主文档 elementFromPoint 会命中 iframe
+        # 本身而不是里面的元素）。命中的是本元素或其后代就算通过。
+        try:
+            loc = self._session.call(
+                "DOM.getNodeForLocation",
+                {"x": int(x), "y": int(y), "includeUserAgentShadowDOM": True},
+            )
+        except ProtocolError as exc:
+            raise ElementError(f"{self!r}: nothing hit at ({x}, {y}) {when}") from exc
+        hit = loc.get("backendNodeId")
+        if hit == self._backend_node_id or (hit is not None and self._contains_backend(hit)):
+            return
+        raise ElementError(
+            f"{self!r} is covered at ({x}, {y}) {when} (topmost node backendNodeId={hit})"
+        )
+
+    #: 从 o 沿 **composed 树**（assignedSlot / ShadowRoot→host）向上找 this —— 能跨 shadow
+    #: 边界。用来判断"命中点落在本元素的 UA/author shadow 内部"（如 <input> 的内部编辑层、
+    #: 投影进 slot 的内容），普通 ``this.contains(o)`` 跨不了 shadow 会漏判。
+    _COMPOSED_CONTAINS = (
+        "function(o){ let n=o; while(n){ if(n===this) return true;"
+        " if(n.assignedSlot){ n=n.assignedSlot; continue; }"
+        " const p=n.parentNode; n=(p&&p.nodeType===11&&p.host)?p.host:p; } return false; }"
+    )
+
+    def _contains_backend(self, other_backend_node_id: int) -> bool:
+        """本元素是否 === 或（沿 composed 树）包含另一个 backendNodeId 的节点。"""
+        target = self._resolve()
+        if target is None:
+            return False
+        try:
+            other = self._session.call("DOM.resolveNode", {"backendNodeId": other_backend_node_id})
+            other_id = (other.get("object") or {}).get("objectId")
+            if not other_id:
+                return False
+            try:
+                r = self._session.call("Runtime.callFunctionOn", {
+                    "objectId": target,
+                    "functionDeclaration": self._COMPOSED_CONTAINS,
+                    "arguments": [{"objectId": other_id}],
+                    "returnByValue": True,
+                })
+                return bool((r.get("result") or {}).get("value"))
+            finally:
+                self._session.call("Runtime.releaseObject", {"objectId": other_id})
+        except ProtocolError:
+            return False
+        finally:
+            self._session.call("Runtime.releaseObject", {"objectId": target})
 
     def require_focus(self, *, after: str) -> None:
         fn = (
@@ -238,69 +285,108 @@ class BackendElement:
         return object_id
 
 
+def _ax_str(node: dict[str, Any], key: str) -> str:
+    return str((node.get(key) or {}).get("value") or "")
+
+
+def _hoist(kids: list[SnapshotNode]) -> SnapshotNode | None:
+    if not kids:
+        return None
+    if len(kids) == 1:
+        return kids[0]
+    return SnapshotNode(role="group", name="", children=kids)
+
+
+def _child_frame_nodes(session: Session, iframe_backend_node_id: int) -> list[dict[str, Any]] | None:
+    """取一个 iframe 的**同进程**子文档 AX 节点列表。
+
+    对同源/同进程 frame，``Accessibility.getFullAXTree({frameId})`` 在主 session 上直接可取，
+    且这些节点的 backendNodeId 在主 session 上就能解析、``DOM.getBoxModel`` 返回的还是**顶层
+    坐标**（Chromium 已把同进程 frame 的偏移/滚动/transform 拍平）—— 所以 BackendElement 一行
+    不用改就能点进去。跨源 OOPIF 在别的 target，这里取不到（返回 ``None``），留给
+    :meth:`Session.frame_element` 走子 session。
+    """
+    try:
+        node = session.call("DOM.describeNode", {"backendNodeId": iframe_backend_node_id})
+        frame_id = (node.get("node") or {}).get("frameId")
+        if not frame_id:
+            return None
+        return session.call("Accessibility.getFullAXTree", {"frameId": frame_id}).get("nodes") or []
+    except SleightError:
+        return None                          # OOPIF / 不可达：不下钻，iframe 节点当叶子
+
+
 def build_snapshot(
     session: Session, nodes: list[dict[str, Any]], generation: str | None,
-    *, ref_for: Any, max_depth: int | None,
+    *, ref_for: Any, max_depth: int | None, cross_frame: bool = True,
 ) -> Snapshot:
     """把 ``Accessibility.getFullAXTree`` 的扁平节点列表建成 :class:`Snapshot`。
 
     :param ref_for: ``backendNodeId -> ref`` 的分配器（由 Session 维护，保证跨快照稳定）
     :param max_depth: 最大深度；``None`` 不限
+    :param cross_frame: 是否把同进程子 frame 的树合并进来（默认合并）。iframe 节点下就直接是
+        它内部的可交互元素，Ref 照样能点，不用手动切 frame
     """
-    by_id = {n["nodeId"]: n for n in nodes}
-    children_of: dict[str, list[str]] = {n["nodeId"]: list(n.get("childIds") or []) for n in nodes}
-    root_id = next((n["nodeId"] for n in nodes if not n.get("parentId")), None)
     refs: dict[str, int] = {}
+    seen_frames: set[int] = set()            # 防自引用/重复下钻的兜底
 
-    def ax_str(node: dict[str, Any], key: str) -> str:
-        return str((node.get(key) or {}).get("value") or "")
+    def build_tree(frame_nodes: list[dict[str, Any]], depth: int) -> SnapshotNode | None:
+        by_id = {n["nodeId"]: n for n in frame_nodes}
+        children_of = {n["nodeId"]: list(n.get("childIds") or []) for n in frame_nodes}
+        root_id = next((n["nodeId"] for n in frame_nodes if not n.get("parentId")), None)
 
-    def convert(node_id: str, depth: int, parent_name: str) -> SnapshotNode | None:
-        node = by_id.get(node_id)
-        if node is None:
-            return None
-        role = ax_str(node, "role")
-        name = ax_str(node, "name")
-        backend = node.get("backendDOMNodeId")
+        def convert(node_id: str, node_depth: int, parent_name: str) -> SnapshotNode | None:
+            node = by_id.get(node_id)
+            if node is None:
+                return None
+            role = _ax_str(node, "role")
+            name = _ax_str(node, "name")
+            backend = node.get("backendDOMNodeId")
 
-        # 蒸馏：InlineTextBox 是最底层文本几何，对 LLM 永远是噪声；StaticText 若只是重复
-        # 父节点的可读名（按钮/标题/链接的文字标签），也去掉，别让上下文全是重复文字。
-        if role == "InlineTextBox":
-            return None
-        if role == "StaticText" and name and name == parent_name:
-            return None
+            # 蒸馏：InlineTextBox 永远是噪声；与父同名的 StaticText 是重复标签，去掉。
+            if role == "InlineTextBox":
+                return None
+            if role == "StaticText" and name and name == parent_name:
+                return None
 
-        ref: str | None = None
-        if role in INTERACTABLE_ROLES and backend is not None and not node.get("ignored"):
-            ref = ref_for(backend)
-            refs[ref] = backend
+            ref: str | None = None
+            if role in INTERACTABLE_ROLES and backend is not None and not node.get("ignored"):
+                ref = ref_for(backend)
+                refs[ref] = backend
 
-        kids: list[SnapshotNode] = []
-        if max_depth is None or depth < max_depth:
-            for child_id in children_of.get(node_id, []):
-                child = convert(child_id, depth + 1, name)
-                if child is not None:
-                    kids.append(child)
+            kids: list[SnapshotNode] = []
+            if max_depth is None or node_depth < max_depth:
+                for child_id in children_of.get(node_id, []):
+                    child = convert(child_id, node_depth + 1, name)
+                    if child is not None:
+                        kids.append(child)
 
-        # 折叠掉噪声节点：无语义容器（generic/none/无 role）且无 ref/name 的，把子节点上提，
-        # 自己不占一行；既不可交互、无名、非结构性、又无子节点的，直接丢。
-        generic = role in ("", "none", "presentation", "generic")
-        if generic and not (ref or name):
-            return _hoist(kids)
-        keep = bool(ref) or bool(name) or role in _STRUCTURAL_KEEP or bool(kids)
-        if not keep:
-            return None
-        value = ax_str(node, "value") or None
-        return SnapshotNode(role=role or "generic", name=name, value=value, ref=ref, children=kids)
+            # 下钻同进程子 frame：把它内部的树接到这个 iframe 节点下
+            if (
+                cross_frame and role.lower() == "iframe" and backend is not None
+                and backend not in seen_frames
+                and (max_depth is None or node_depth < max_depth)
+            ):
+                seen_frames.add(backend)
+                child_nodes = _child_frame_nodes(session, backend)
+                if child_nodes:
+                    sub = build_tree(child_nodes, node_depth + 1)
+                    if sub is not None:
+                        # 去掉子文档那层 RootWebArea 包裹，内容直接挂到 iframe 下
+                        kids.extend(sub.children if sub.role == "RootWebArea" else [sub])
 
-    def _hoist(kids: list[SnapshotNode]) -> SnapshotNode | None:
-        if not kids:
-            return None
-        if len(kids) == 1:
-            return kids[0]
-        return SnapshotNode(role="group", name="", children=kids)
+            generic = role in ("", "none", "presentation", "generic")
+            if generic and not (ref or name):
+                return _hoist(kids)
+            keep = bool(ref) or bool(name) or role in _STRUCTURAL_KEEP or bool(kids)
+            if not keep:
+                return None
+            value = _ax_str(node, "value") or None
+            return SnapshotNode(
+                role=role or "generic", name=name, value=value, ref=ref, children=kids
+            )
 
-    root = convert(root_id, 0, "") if root_id is not None else None
-    if root is None:
-        root = SnapshotNode(role="RootWebArea", name="")
+        return convert(root_id, depth, "") if root_id is not None else None
+
+    root = build_tree(nodes, 0) or SnapshotNode(role="RootWebArea", name="")
     return Snapshot(session, root, refs, generation)

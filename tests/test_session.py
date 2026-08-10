@@ -1453,6 +1453,52 @@ def test_snapshot_max_depth_prunes_the_tree():
     assert 'button "Go"' in shallow
 
 
+def test_snapshot_merges_same_process_child_frame():
+    s, t = build()
+    main = {"nodes": [
+        {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "P"},
+         "childIds": ["2", "3"]},
+        {"nodeId": "2", "parentId": "1", "role": {"value": "button"},
+         "name": {"value": "ParentBtn"}, "backendDOMNodeId": 9},
+        {"nodeId": "3", "parentId": "1", "role": {"value": "Iframe"}, "name": {"value": ""},
+         "backendDOMNodeId": 10},
+    ]}
+    child = {"nodes": [
+        {"nodeId": "c1", "role": {"value": "RootWebArea"}, "name": {"value": "C"},
+         "childIds": ["c2"]},
+        {"nodeId": "c2", "parentId": "c1", "role": {"value": "button"},
+         "name": {"value": "ChildBtn"}, "backendDOMNodeId": 16},
+    ]}
+    # getFullAXTree 带 frameId 时返回子 frame 的树，否则主 frame
+    t.results["Accessibility.getFullAXTree"] = lambda p: child if p.get("frameId") else main
+    t.results["DOM.describeNode"] = {"node": {"frameId": "F-CHILD"}}
+
+    named = {n.name for n in _walk(s.snapshot().root) if n.ref}
+    assert "ParentBtn" in named and "ChildBtn" in named, "同进程 iframe 内元素应合并进来并带 Ref"
+
+    flat = {n.name for n in _walk(s.snapshot(cross_frame=False).root) if n.ref}
+    assert "ChildBtn" not in flat, "cross_frame=False 不应合并 iframe 内容"
+
+
+def test_snapshot_does_not_descend_oopif_that_fails():
+    s, t = build()
+    main = {"nodes": [
+        {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "P"},
+         "childIds": ["3"]},
+        {"nodeId": "3", "parentId": "1", "role": {"value": "Iframe"}, "name": {"value": ""},
+         "backendDOMNodeId": 10},
+    ]}
+    # describeNode 给出 frameId，但子 frame 的 getFullAXTree 抛错（模拟 OOPIF 不可达）
+    def ax(p):
+        if p.get("frameId"):
+            raise ProtocolError("Frame not found", code=-32000)
+        return main
+    t.results["Accessibility.getFullAXTree"] = ax
+    t.results["DOM.describeNode"] = {"node": {"frameId": "F-OOPIF"}}
+    snap = s.snapshot()          # 不应抛，iframe 当叶子
+    assert not [n for n in _walk(snap.root) if n.ref], "OOPIF 不下钻，也不崩"
+
+
 def _walk(node):
     yield node
     for c in node.children:
