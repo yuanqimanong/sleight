@@ -26,10 +26,12 @@ from .core.errors import (
     NotReady,
     SessionLost,
     SleightError,
+    StaleRef,
 )
 from .core.human import CAREFUL, DEFAULT, FAST, HumanProfile
 from .core.resources import NetworkResource
 from .core.session import Selectable, Session
+from .core.snapshot import BackendElement, Snapshot, SnapshotNode
 from .core.transport import Transport
 from .core.types import (
     Box,
@@ -64,6 +66,9 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "Session",
     "Selectable",
     "Element",
+    "Snapshot",
+    "SnapshotNode",
+    "BackendElement",
     "NetworkResource",
     "Transport",
     "enable_debug_logging",
@@ -100,6 +105,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "SessionLost",
     "LeaseLost",
     "ElementError",
+    "StaleRef",
 ]
 
 

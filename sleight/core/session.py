@@ -38,6 +38,7 @@ from .resources import (
     NetworkResource,
     ResourceTracker,
 )
+from .snapshot import Snapshot, build_snapshot
 from .transport import Transport
 from .types import Box, ClearReport, Condition, DomReady, Point, StorageType
 
@@ -161,6 +162,10 @@ class Session:
         self._frame_contexts: dict[str, int] = {}
         # 跨源 OOPIF 的 url -> attach 出来的子 CDP sessionId。懒建、缓存，close 时统一 detach。
         self._oopif_sessions: dict[str, str] = {}
+        # Snapshot Ref 分配表：(loaderId, backendNodeId) -> ref。同节点跨快照拿同一个 ref；
+        # 页面导航后 loaderId 变，旧 key 自然不再命中（旧 Ref 也随之判为 stale）。
+        self._ref_registry: dict[tuple[str | None, int], str] = {}
+        self._ref_counter = 0
         self._netidle = NetworkIdleTracker()
         self._track_network = track_network
         # 事件观察者。有了它就不必去 monkeypatch _handle —— 那是私有方法，而且补丁
@@ -995,6 +1000,38 @@ class Session:
                 )
             scope = _SessionScope(self, self._attach_oopif(src))
         return FrameElement(self, iframe, scope, selector, index)
+
+    # ------------------------------------------------------------------ #
+    # Snapshot / Ref —— 给 LLM 看的无障碍树 + 可交互元素的稳定 Ref
+    # ------------------------------------------------------------------ #
+
+    def snapshot(self, *, max_depth: int | None = None) -> Snapshot:
+        """抓一份**主 frame** 的无障碍快照，给可交互元素分配稳定、可校验的 Ref。
+
+        典型用法：把 ``snapshot().text()`` 喂给 LLM，LLM 挑一个 Ref，再
+        ``session.click(snap.ref("e5"))`` —— Ref 解析出的元素满足 ElementLike，直接复用
+        现有拟人轨迹与双重命中校验，产生真实（``isTrusted=true``）输入。
+
+        Ref 绑定当前导航纪元：同一节点跨多次 snapshot 拿到同一个 Ref；页面导航后旧 Ref
+        失效（:meth:`Snapshot.ref` 抛 :class:`~sleight.core.errors.StaleRef`），不静默误点。
+
+        :param max_depth: 树的最大深度，``None`` 不限。深页可用它压上下文
+        :returns: :class:`~sleight.core.snapshot.Snapshot`
+        """
+        self.drain()
+        nodes = self.call("Accessibility.getFullAXTree").get("nodes") or []
+        generation = self._loader_id
+
+        def ref_for(backend_node_id: int) -> str:
+            key = (generation, backend_node_id)
+            ref = self._ref_registry.get(key)
+            if ref is None:
+                self._ref_counter += 1
+                ref = f"e{self._ref_counter}"
+                self._ref_registry[key] = ref
+            return ref
+
+        return build_snapshot(self, nodes, generation, ref_for=ref_for, max_depth=max_depth)
 
     # ------------------------------------------------------------------ #
     # 交互

@@ -16,6 +16,7 @@ __all__ = [
     "ProtocolError",
     "SessionLost",
     "SleightError",
+    "StaleRef",
     "TimeoutError",
 ]
 
@@ -100,3 +101,11 @@ class TimeoutError(SleightError):
 
 class ElementError(SleightError):
     """选择器没命中 / 元素不可交互 / 被其它元素遮挡。"""
+
+
+class StaleRef(ElementError):
+    """Snapshot Ref 已失效 —— 页面在这次 Snapshot 之后又导航过。
+
+    Ref 绑定的是取快照那一刻的导航纪元（loaderId）。页面换文档后旧 Ref 指向的节点已经
+    不属于当前文档，**绝不**静默降级去点一个可能完全不同的元素；重新 :meth:`Session.snapshot`。
+    """

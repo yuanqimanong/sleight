@@ -1319,6 +1319,94 @@ def test_frame_element_hit_test_fails_when_something_covers_the_iframe():
         fe.require_hit(130, 70, when="test")
 
 
+# --------------------------------------------------------------------------- #
+# Snapshot / Ref
+# --------------------------------------------------------------------------- #
+
+
+def _ax_nodes():
+    """一棵小 AX 树：heading(+ 冗余 StaticText + InlineTextBox)、button、textbox、paragraph。"""
+    return {"nodes": [
+        {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "T"},
+         "childIds": ["2", "3", "4", "6"]},
+        {"nodeId": "2", "parentId": "1", "role": {"value": "heading"},
+         "name": {"value": "Head"}, "backendDOMNodeId": 8, "childIds": ["5", "7"]},
+        {"nodeId": "5", "parentId": "2", "role": {"value": "StaticText"},
+         "name": {"value": "Head"}},                       # 冗余：与父同名，应被去掉
+        {"nodeId": "7", "parentId": "2", "role": {"value": "InlineTextBox"},
+         "name": {"value": "Head"}},                       # InlineTextBox：永远去掉
+        {"nodeId": "3", "parentId": "1", "role": {"value": "button"},
+         "name": {"value": "Go"}, "backendDOMNodeId": 9},
+        {"nodeId": "4", "parentId": "1", "role": {"value": "textbox"},
+         "name": {"value": "q"}, "value": {"value": "typed"}, "backendDOMNodeId": 3},
+        {"nodeId": "6", "parentId": "1", "role": {"value": "paragraph"}, "name": {"value": ""},
+         "childIds": ["8"]},
+        {"nodeId": "8", "parentId": "6", "role": {"value": "StaticText"},
+         "name": {"value": "standalone text"}},            # 独立正文：应保留
+    ]}
+
+
+def test_snapshot_assigns_refs_only_to_interactable_nodes():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    snap = s.snapshot()
+    # button + textbox 拿 ref；heading/paragraph/StaticText 不拿
+    assert set(snap.refs) == {"e1", "e2"}
+    txt = snap.text()
+    assert 'button "Go" [e1]' in txt
+    assert 'textbox "q" value="typed" [e2]' in txt
+    assert 'heading "Head"' in txt and "[e" not in txt.split("heading")[1].split("\n")[0]
+
+
+def test_snapshot_distills_redundant_text():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    txt = s.snapshot().text()
+    assert "InlineTextBox" not in txt, "InlineTextBox 应被去掉"
+    assert txt.count("Head") == 1, "重复的 StaticText 'Head' 应被折叠，只留 heading"
+    assert "standalone text" in txt, "独立正文应保留"
+
+
+def test_snapshot_refs_are_stable_across_snapshots():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    first = {n.ref for n in _walk(s.snapshot().root) if n.ref}
+    second_snap = s.snapshot()
+    # 同一 (loaderId, backendNodeId) 跨快照必须拿同一个 ref
+    assert {n.ref for n in _walk(second_snap.root) if n.ref} == first == {"e1", "e2"}
+
+
+def test_snapshot_ref_goes_stale_after_navigation():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    snap = s.snapshot()
+    s._loader_id = "L-NEW"          # 模拟页面导航换了纪元
+    with pytest.raises(SleightError, match="stale"):
+        snap.ref("e1")
+
+
+def test_snapshot_unknown_ref_is_rejected():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    snap = s.snapshot()
+    with pytest.raises(SleightError, match="unknown ref"):
+        snap.ref("e999")
+
+
+def test_snapshot_max_depth_prunes_the_tree():
+    s, t = build()
+    t.results["Accessibility.getFullAXTree"] = _ax_nodes()
+    shallow = s.snapshot(max_depth=1).text()
+    # heading 在深度 1，其下的（已蒸馏）文本更深；button/textbox 也在深度 1
+    assert 'button "Go"' in shallow
+
+
+def _walk(node):
+    yield node
+    for c in node.children:
+        yield from _walk(c)
+
+
 def test_back_and_forward_walk_the_history():
     s, t = build()
     t.results["Page.getNavigationHistory"] = HISTORY

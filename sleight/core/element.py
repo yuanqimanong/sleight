@@ -22,9 +22,12 @@ if TYPE_CHECKING:
 __all__ = ["Element", "ElementLike", "composed_hit_body"]
 
 
-def composed_hit_body(x: int, y: int) -> str:
+def composed_hit_body(x: int | str, y: int | str) -> str:
     """一段 JS 语句体：作用域里有 ``el`` 时，判断 (x, y) 是否命中 ``el``（**穿透 open
     Shadow DOM**）。用 ``return`` 结束，供 ``_eval`` 那种 ``el`` 已绑定的包裹里直接用。
+
+    ``x`` / ``y`` 传数字就是字面坐标；传变量名字符串（如 ``"x"``）则引用外层作用域的
+    变量 —— 供 ``Runtime.callFunctionOn`` 那种 ``el = this`` + 形参传坐标的场景复用。
 
     普通写法 ``el.contains(document.elementFromPoint(x,y))`` 在 Shadow DOM 下会**假阴性**：
     命中点落在 open shadow root 内（或投影到 ``<slot>`` 的内容上）时，``elementFromPoint``
