@@ -2,6 +2,7 @@
 
 from .base import BaseProvider, HTTPProvider, Provider
 from .cloakbrowser import CLEAR, UNSET, CloakBrowserManager, ProfileSpec
+from .local import LocalLauncher
 from .plain import Plain
 
 __all__ = [
@@ -10,6 +11,7 @@ __all__ = [
     "BaseProvider",
     "CloakBrowserManager",
     "HTTPProvider",
+    "LocalLauncher",
     "Plain",
     "ProfileSpec",
     "Provider",

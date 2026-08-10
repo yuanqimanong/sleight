@@ -313,6 +313,15 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.fixture
+def chromium_path() -> str:
+    """一个标准 Chromium/Chrome 可执行文件路径；没有就 skip。给 LocalLauncher 用。"""
+    path = _find_chromium()
+    if path is None:
+        pytest.skip("no standard Chromium found (set SLEIGHT_TEST_CHROMIUM to a binary)")
+    return path
+
+
 @pytest.fixture(scope="session")
 def live_endpoint() -> Iterator[str]:
     """启动一台 headless 标准 Chromium，产出它的 CDP HTTP 端点；没有浏览器就 skip。"""

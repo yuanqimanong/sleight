@@ -57,6 +57,7 @@ except PackageNotFoundError:      # 从源码目录直接 import，没装进环�
 __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "__version__",
     "connect",
+    "launch",
     "Pool",
     "InstanceHandle",
     "BrowserContext",
@@ -142,4 +143,73 @@ def connect(url: str, *, headers: dict[str, str] | None = None, **kw: Any) -> _C
         return _Connection(transport, Session.create(transport, **kw))
     except BaseException:
         transport.close()
+        raise
+
+
+class _LaunchedConnection:
+    """``launch()`` 的返回：启动的本机浏览器 + 一个 Session，退出时都收干净。"""
+
+    def __init__(self, launcher: Any, transport: Transport, session: Session) -> None:
+        self._launcher = launcher
+        self._t = transport
+        self.session = session
+
+    def __enter__(self) -> Session:
+        return self.session
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            self.session.close()
+        finally:
+            try:
+                self._t.close()
+            finally:
+                self._launcher.close()      # 停浏览器进程、清理临时 Profile
+
+
+def launch(
+    binary: str,
+    *,
+    fingerprint: int | None = None,
+    headless: bool = True,
+    no_sandbox: bool = False,
+    profile_dir: str | None = None,
+    args: Any = (),
+    **kw: Any,
+) -> _LaunchedConnection:
+    """启动一个**本机**浏览器 binary 并连上它，**新建自有 tab**；退出时停进程、清临时 Profile。
+
+    ``connect()`` 连的是已经在跑的端点；``launch()`` 负责把进程也拉起来。内核不挑 ——
+    标准 Chromium、fingerprint-chromium、Cloak 本地 binary 都行，换的只是 ``binary`` 和
+    ``fingerprint`` 种子，业务动作一致。需要 Pool/租约就直接用
+    :class:`~sleight.providers.local.LocalLauncher`。
+
+        >>> with launch("fingerprint-chromium", fingerprint=42) as s:
+        ...     s.open("https://example.com")
+
+    :param binary: 可执行文件路径或 ``PATH`` 上的名字
+    :param fingerprint: 指纹种子（fingerprint-chromium / Cloak 支持），同 seed 同人格
+    :param headless: 无头，默认 True
+    :param no_sandbox: Linux root/容器里通常要 True
+    :param profile_dir: 持久 Profile 目录；``None`` 用临时目录并在退出时删除
+    :param args: 追加的启动参数
+    :param kw: 透传给 :meth:`Session.create`（``human`` / ``rng`` / ``track_network``）
+    """
+    from .providers.local import LocalLauncher
+
+    launcher = LocalLauncher(
+        binary, fingerprint=fingerprint, headless=headless,
+        no_sandbox=no_sandbox, profile_dir=profile_dir, args=args,
+    )
+    try:
+        launcher.ensure_ready("default")
+        ep = launcher.endpoint("default")
+        transport = Transport.connect(ep.ws_url, headers=dict(ep.headers))
+        try:
+            return _LaunchedConnection(launcher, transport, Session.create(transport, **kw))
+        except BaseException:
+            transport.close()
+            raise
+    except BaseException:
+        launcher.close()
         raise
