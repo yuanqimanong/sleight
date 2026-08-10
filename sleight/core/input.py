@@ -19,7 +19,7 @@ import time
 from random import Random
 from typing import TYPE_CHECKING, Any
 
-from .element import Element
+from .element import ElementLike
 from .errors import ElementError, ProtocolError
 from .human import engine
 from .human.presets import DEFAULT, HumanProfile
@@ -32,8 +32,10 @@ log = logging.getLogger("sleight.input")
 
 __all__ = ["Aimable", "HumanSwitch", "InputDriver", "resolve_profile"]
 
-#: 能瞄准的东西：选择器 / 已解析的元素 / 裸坐标 / 裸几何
-Aimable = str | Element | Point | Box
+#: 能瞄准的东西：选择器 / 已解析的元素 / 裸坐标 / 裸几何。
+#: 元素这一档是 :class:`~sleight.core.element.ElementLike` 协议 —— 输入链不认具体类，
+#: Element / FrameElement / BackendElement 都能传进来。
+Aimable = str | ElementLike | Point | Box
 
 #: 单句拟人开关的三态。``None`` 继承 Session 默认，``False`` 直通，
 #: ``True`` 用 DEFAULT 预设，给 :class:`HumanProfile` 就用它
@@ -184,7 +186,7 @@ class InputDriver:
 
     def _target_box(
         self, target: Aimable, *, human: HumanProfile | None
-    ) -> tuple[Box | Point, Element | None]:
+    ) -> tuple[Box | Point, ElementLike | None]:
         """把各种目标形态归一成几何 + 可选的元素（用于命中校验）。
 
         :param target: 选择器 / Element / 裸坐标 / 裸 Box
@@ -407,7 +409,7 @@ class InputDriver:
     def _grab(
         self,
         geometry: Box | Point,
-        element: Element | None,
+        element: ElementLike | None,
         *,
         profile: HumanProfile | None,
         button: str,
@@ -493,7 +495,7 @@ class InputDriver:
 
     def type(
         self,
-        target: str | Element | None,
+        target: str | ElementLike | None,
         text: str,
         *,
         human: HumanSwitch = None,
@@ -509,7 +511,7 @@ class InputDriver:
         :raises ElementError: 目标不存在、被遮挡，或 ``clear=True`` 时焦点没落对
         """
         profile = self._profile(human)
-        element: Element | None = None
+        element: ElementLike | None = None
 
         if target is not None:
             # 先真实点击聚焦 —— 直接发按键事件会打到当前焦点上，那不一定是这个输入框
@@ -547,7 +549,7 @@ class InputDriver:
         profile = self._profile(human)
         self._run(engine.scroll_events(self.cursor, dy, rng=self._rng, profile=profile))
 
-    def scroll_into_view(self, target: str | Element, *, human: HumanSwitch = None) -> None:
+    def scroll_into_view(self, target: str | ElementLike, *, human: HumanSwitch = None) -> None:
         """把元素滚进视口。
 
         - **默认**：发真实 ``mouseWheel`` 分步滚动（有滚动事件序列，像人）
@@ -567,7 +569,7 @@ class InputDriver:
     # 内部
     # ------------------------------------------------------------------ #
 
-    def _scroll_into_view(self, element: Element, profile: HumanProfile | None) -> None:
+    def _scroll_into_view(self, element: ElementLike, profile: HumanProfile | None) -> None:
         """``profile`` 已解析：None 就是直通，不再回头查 Session 默认。"""
         if profile is None:
             self._scroll_into_view_instant(element)
@@ -598,7 +600,7 @@ class InputDriver:
                 "implemented). Try human=False to use DOM.scrollIntoViewIfNeeded."
             )
 
-    def _scroll_into_view_instant(self, element: Element) -> None:
+    def _scroll_into_view_instant(self, element: ElementLike) -> None:
         object_id = element.object_id()
         try:
             self._session.call("DOM.scrollIntoViewIfNeeded", {"objectId": object_id})

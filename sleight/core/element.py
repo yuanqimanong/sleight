@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .errors import ElementError
 from .types import Box
@@ -19,7 +19,50 @@ from .types import Box
 if TYPE_CHECKING:
     from .session import Session
 
-__all__ = ["Element"]
+__all__ = ["Element", "ElementLike"]
+
+
+@runtime_checkable
+class ElementLike(Protocol):
+    """输入链认的元素契约 —— :class:`InputDriver` 只依赖这几个方法，不依赖具体类。
+
+    抽出这个 Protocol 是为了让"点谁"和"怎么点"解耦：拟人轨迹、双重命中校验、焦点
+    校验那一整套（``core/input.py``）此后只面向本协议，不再 ``import Element``。
+
+    :class:`Element`（主 frame、selector + index 寻址）是它今天唯一的实现。后续的
+    ``FrameElement``（iframe 内、按 executionContextId 求值）和 ``BackendElement``
+    （AX/Snapshot 解析出的 backendNodeId 节点）只要实现同一组方法，就能原样复用现有
+    输入链，一行轨迹或命中校验代码都不用改。这也是 iframe 支持与 Ref 生命周期的共同
+    支点。
+    """
+
+    def exists(self) -> bool:
+        """现在还能定位到这个元素吗。"""
+        ...
+
+    def in_viewport(self) -> bool:
+        """元素当前是否落在视口内。"""
+        ...
+
+    def require_box(self) -> Box:
+        """取几何；元素不在了要抛，不能返回 ``None``。"""
+        ...
+
+    def require_hit(self, x: int, y: int, *, when: str) -> None:
+        """确认 (x, y) 处最上层是本元素或其后代，否则抛。"""
+        ...
+
+    def require_focus(self, *, after: str) -> None:
+        """确认焦点真的落在本元素上，否则抛。"""
+        ...
+
+    def scroll_metrics(self) -> dict[str, float]:
+        """滚动定位要用的 top/bottom/height 等度量。"""
+        ...
+
+    def object_id(self) -> str:
+        """解析出一个 CDP ``objectId``（``DOM.scrollIntoViewIfNeeded`` 等要用）。"""
+        ...
 
 
 class Element:

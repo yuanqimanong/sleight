@@ -21,10 +21,10 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from fnmatch import fnmatch
 from random import Random
-from typing import Any
+from typing import Any, overload
 from urllib.parse import urlsplit
 
-from .element import Element
+from .element import Element, ElementLike
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
 from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
@@ -107,8 +107,10 @@ def _same_document(here: str, there: str) -> bool:
 
 
 #: 交互方法收的目标形态。叫 ``Selectable`` 而不是 ``Target`` —— 这个文件里
-#: ``Target.createTarget`` / ``Target.attachToTarget`` 满地都是，同名会读岔
-Selectable = str | Element
+#: ``Target.createTarget`` / ``Target.attachToTarget`` 满地都是，同名会读岔。
+#: 元素这一档放宽到 :class:`~sleight.core.element.ElementLike` 协议，好让 iframe /
+#: Ref 解析出来的元素也能直接喂给交互方法；``Element`` 是其一个实现，向后兼容。
+Selectable = str | ElementLike
 
 
 class Session:
@@ -759,15 +761,29 @@ class Session:
         """
         return [Element(self, selector, i) for i in range(self._count(selector))]
 
-    def require(self, target: Selectable) -> Element:
-        """把选择器或 Element 统一成一个**确认存在**的 Element。
+    @overload
+    def require(self, target: str | Element) -> Element: ...
+    @overload
+    def require(self, target: ElementLike) -> ElementLike: ...
 
-        :param target: CSS 选择器字符串，或已有的 Element
-        :raises ElementError: 选择器没命中
+    def require(self, target: Selectable) -> ElementLike:
+        """把选择器或元素统一成一个**确认存在**的元素。
+
+        选择器（``str``）会构造出主 frame 的 :class:`Element`；已经是元素的（``Element``、
+        或 iframe / Ref 解析出的 :class:`~sleight.core.element.ElementLike`）原样返回，
+        只补一次存在性校验。重载保证最常见的"选择器 / Element"路径返回类型仍是
+        ``Element``，不丢它专有的 ``text() / attr() / value()`` 等方法。
+
+        :param target: CSS 选择器字符串，或任何 :class:`ElementLike`
+        :raises ElementError: 选择器没命中，或元素已不在
         """
-        el = Element(self, target, 0) if isinstance(target, str) else target
+        el: ElementLike = Element(self, target, 0) if isinstance(target, str) else target
         if not el.exists():
-            raise ElementError(f"no element matches {el.selector!r}[{el.index}]")
+            # Element 有 selector/index 可以拼出更有用的消息；别的 ElementLike 实现
+            # 未必有，回落到 repr，避免这里因为读不到属性而炸在错误路径上
+            selector = getattr(el, "selector", None)
+            label = f"{selector!r}[{getattr(el, 'index', 0)}]" if selector is not None else repr(el)
+            raise ElementError(f"no element matches {label}")
         return el
 
     # ------------------------------------------------------------------ #

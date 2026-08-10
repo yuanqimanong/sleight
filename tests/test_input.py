@@ -6,7 +6,7 @@ from random import Random
 
 import pytest
 
-from sleight.core.element import Element
+from sleight.core.element import Element, ElementLike
 from sleight.core.errors import ElementError
 from sleight.core.human import engine
 from sleight.core.human.presets import CAREFUL, DEFAULT, FAST
@@ -86,6 +86,62 @@ def test_human_mode_emits_a_real_trajectory(session: FakeSession):
     kinds = session.transport.types()
     assert kinds.count("mouseMoved") > 8
     assert kinds[-2:] == ["mousePressed", "mouseReleased"]
+
+
+# --------------------------------------------------------------------------- #
+# ElementLike 协议：输入链只认协议，不认具体类
+# --------------------------------------------------------------------------- #
+
+
+class _FakeElementLike:
+    """不是 Element 的 ElementLike 实现 —— 只实现协议要求的那几个方法。
+
+    用来证明 InputDriver 已经和具体的 Element 类解耦：iframe 的 FrameElement、
+    Ref 的 BackendElement 将来照这个形状接进来就能复用整条输入链。
+    """
+
+    def __init__(self, box: Box) -> None:
+        self._box = box
+        self.hit_probes: list[tuple[int, int]] = []
+
+    def exists(self) -> bool:
+        return True
+
+    def in_viewport(self) -> bool:
+        return True
+
+    def require_box(self) -> Box:
+        return self._box
+
+    def require_hit(self, x: int, y: int, *, when: str) -> None:
+        self.hit_probes.append((x, y))
+
+    def require_focus(self, *, after: str) -> None:
+        pass
+
+    def scroll_metrics(self) -> dict[str, float]:
+        return {"top": self._box.y, "bottom": self._box.y + self._box.h, "height": 720.0}
+
+    def object_id(self) -> str:
+        return "OBJ-FAKE"
+
+
+def test_element_and_fake_both_satisfy_the_protocol():
+    assert isinstance(_FakeElementLike(Box(10.0, 10.0, 20.0, 20.0)), ElementLike)
+    # Element 结构上也满足协议（没有显式继承，靠 runtime_checkable 认方法）
+    assert issubclass(Element, ElementLike)
+
+
+def test_input_driver_accepts_any_element_like(session: FakeSession):
+    """把一个非 Element 的 ElementLike 直接交给 click：走完整条输入链，两次命中校验都
+    落在它自己身上，末尾发出真正的按下/抬起。这就是 iframe 与 Ref 复用输入链的支点。"""
+    el = _FakeElementLike(Box(400.0, 300.0, 120.0, 40.0))
+    driver(session, default_human=False).click(el)
+
+    assert session.transport.types() == ["mouseMoved", "mousePressed", "mouseReleased"]
+    assert len(el.hit_probes) == 2, "点击前后各要做一次命中校验，且落在传入的元素上"
+    # 命中校验没有退回到 FakeSession 的 elementFromPoint 探针 —— 用的是元素自己的
+    assert session.hit_tests == 0
 
 
 # --------------------------------------------------------------------------- #
