@@ -20,6 +20,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .element import composed_hit_body
 from .errors import ElementError
 from .types import Box
 
@@ -221,12 +222,9 @@ class FrameElement:
                 f"{self!r}: point ({x}, {y}) is not over its iframe {when} "
                 "(something in the parent page is covering it)"
             )
-        # 第二级：换算到 frame 内坐标，命中的必须是目标元素或其后代
+        # 第二级：换算到 frame 内坐标，命中的必须是目标元素或其后代（穿透 Shadow DOM）
         fx, fy = round(x - off["x"]), round(y - off["y"])
-        hit = self._inner(
-            f"const h = el.getRootNode().elementFromPoint({fx}, {fy});"
-            " return !!h && (h === el || el.contains(h));"
-        )
+        hit = self._inner(composed_hit_body(fx, fy))
         if not hit:
             raise ElementError(
                 f"{self!r} is covered inside its iframe at frame-local ({fx}, {fy}) {when}"

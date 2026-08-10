@@ -1184,6 +1184,26 @@ def test_execution_context_map_clears_on_navigation():
     assert s._frame_contexts == {}, "整页导航后旧的执行上下文映射必须清空"
 
 
+def test_pierce_element_uses_a_shadow_piercing_ref():
+    from sleight.core.element import Element
+    s, _ = build()
+    plain = Element(s, "#x").js_ref
+    pierce = Element(s, "#x", pierce=True).js_ref
+    assert plain == "document.querySelectorAll(\"#x\")[0]"
+    assert "shadowRoot" in pierce and "walk" in pierce, "pierce 版必须递归进 shadowRoot"
+
+
+def test_query_shadow_returns_a_pierce_element_when_present():
+    s, _ = build(evaluate=lambda expr: True if "return true;" in expr else None)
+    el = s.query_shadow("#deep")
+    assert el is not None and el.pierce is True
+
+
+def test_query_shadow_returns_none_when_absent():
+    s, _ = build(evaluate=lambda expr: None)
+    assert s.query_shadow("#missing") is None
+
+
 class _StubIframe:
     """FrameElement 需要的父页 <iframe> Element 替身：只提供 js_ref 和 repr。"""
 

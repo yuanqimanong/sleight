@@ -251,7 +251,9 @@ class FakeSession:
         self.evals.append(expr)
         box, (vw, vh) = self.box, self._viewport
 
-        if "elementFromPoint" in expr and "el.contains(hit)" in expr:
+        # 命中校验：老式 el.contains(hit)，以及新的 composed（穿透 Shadow DOM）版本
+        # el.contains(node)。两者都是"这一点命中的是不是本元素"的探针。
+        if "elementFromPoint" in expr and ("el.contains(hit)" in expr or "el.contains(node)" in expr):
             match = re.search(r"elementFromPoint\((-?\d+),\s*(-?\d+)\)", expr)
             if match:
                 self.probes.append((int(match.group(1)), int(match.group(2))))

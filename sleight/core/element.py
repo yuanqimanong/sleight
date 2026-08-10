@@ -19,7 +19,34 @@ from .types import Box
 if TYPE_CHECKING:
     from .session import Session
 
-__all__ = ["Element", "ElementLike"]
+__all__ = ["Element", "ElementLike", "composed_hit_body"]
+
+
+def composed_hit_body(x: int, y: int) -> str:
+    """一段 JS 语句体：作用域里有 ``el`` 时，判断 (x, y) 是否命中 ``el``（**穿透 open
+    Shadow DOM**）。用 ``return`` 结束，供 ``_eval`` 那种 ``el`` 已绑定的包裹里直接用。
+
+    普通写法 ``el.contains(document.elementFromPoint(x,y))`` 在 Shadow DOM 下会**假阴性**：
+    命中点落在 open shadow root 内（或投影到 ``<slot>`` 的内容上）时，``elementFromPoint``
+    返回的是 shadow host，``el.contains(host)`` 为 false —— 明明没被遮挡却判成被遮挡，
+    于是可点的元素被拒。这里改成：逐层 ``shadowRoot.elementFromPoint`` 钻到最深命中节点，
+    再按 **composed 树**（``assignedSlot`` / ShadowRoot→host）向上找 ``el``。
+    """
+    return (
+        f"let node = document.elementFromPoint({x}, {y});"
+        f" while (node && node.shadowRoot) {{"
+        f"   const inner = node.shadowRoot.elementFromPoint({x}, {y});"
+        f"   if (!inner || inner === node) break; node = inner; }}"
+        " if (!node) return false;"
+        " if (el.contains(node)) return true;"          # 同一棵树里 el 是祖先
+        " let n = node;"
+        " while (n) {"                                  # 沿 composed 树向上找 el
+        "   if (n === el) return true;"
+        "   if (n.assignedSlot) { n = n.assignedSlot; continue; }"
+        "   const p = n.parentNode;"
+        "   n = (p && p.nodeType === 11 && p.host) ? p.host : p; }"
+        " return false;"
+    )
 
 
 @runtime_checkable
@@ -66,16 +93,21 @@ class ElementLike(Protocol):
 
 
 class Element:
-    __slots__ = ("_session", "index", "selector")
+    __slots__ = ("_session", "index", "pierce", "selector")
 
-    def __init__(self, session: Session, selector: str, index: int = 0) -> None:
+    def __init__(
+        self, session: Session, selector: str, index: int = 0, *, pierce: bool = False
+    ) -> None:
         self._session = session
         self.selector = selector
         self.index = index
+        #: True 表示解析时穿透 open Shadow DOM（见 :attr:`js_ref`）。普通 DOM 用不到。
+        self.pierce = pierce
 
     def __repr__(self) -> str:
         at = f"[{self.index}]" if self.index else ""
-        return f"<Element {self.selector!r}{at}>"
+        tag = " pierce" if self.pierce else ""
+        return f"<Element {self.selector!r}{at}{tag}>"
 
     # ------------------------------------------------------------------ #
     # JS 侧的元素引用
@@ -88,8 +120,20 @@ class Element:
         用 ``json.dumps`` 而不是 Python 的 ``repr`` —— repr 走 Python 的引号与转义
         规则，遇到反斜杠、引号、非 ASCII 会产出不合法或语义不同的 JS 字面量。
         ``json.dumps`` 产出的恰好是合法 JS 字符串字面量。
+
+        :attr:`pierce` 为真时用一段深度遍历表达式，递归进每个 open ``shadowRoot`` 收集
+        匹配项 —— 原生 ``querySelectorAll`` **不穿透 Shadow DOM**，shadow 内的元素靠它
+        根本定位不到。返回的仍是一个真实节点，后续 box / hit_test / object_id 一律照旧。
         """
-        return f"document.querySelectorAll({json.dumps(self.selector)})[{self.index}]"
+        sel = json.dumps(self.selector)
+        if not self.pierce:
+            return f"document.querySelectorAll({sel})[{self.index}]"
+        return (
+            f"(() => {{ const sel = {sel}; const out = [];"
+            " const walk = (root) => { out.push(...root.querySelectorAll(sel));"
+            "   for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot); };"
+            f" walk(document); return out[{self.index}]; }})()"
+        )
 
     def _eval(self, body: str) -> Any:
         """在 ``el`` 绑定到本元素的作用域里求值。元素不存在时 body 不执行。"""
@@ -222,20 +266,16 @@ class Element:
     # ------------------------------------------------------------------ #
 
     def hit_test(self, x: int, y: int) -> bool:
-        """(x, y) 处最上层的元素是不是本元素或其后代。
+        """(x, y) 处最上层的元素是不是本元素或其后代（**穿透 open Shadow DOM**）。
 
         false 说明被遮挡（cookie 弹窗、fixed 头部、遮罩层）。不做这步的症状是
-        "点了但没反应"，排查极费时间。
+        "点了但没反应"，排查极费时间。命中判断走 composed 树，避免 shadow root / slot
+        投影内容被误判成"被遮挡"。
 
         :param x: viewport CSS 像素
         :param y: viewport CSS 像素
         """
-        return bool(
-            self._eval(
-                f"const hit = document.elementFromPoint({x}, {y});"
-                " return !!hit && (hit === el || el.contains(hit));"
-            )
-        )
+        return bool(self._eval(composed_hit_body(x, y)))
 
     def has_focus(self) -> bool:
         """本元素或其后代是不是 ``document.activeElement``。"""

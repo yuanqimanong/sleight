@@ -789,6 +789,21 @@ class Session:
         """
         return [Element(self, selector, i) for i in range(self._count(selector))]
 
+    def query_shadow(self, selector: str, index: int = 0) -> Element | None:
+        """穿透 open Shadow DOM 定位元素 —— 原生 ``querySelector`` 到不了 shadow 内。
+
+        返回的 :class:`Element` 满足 :class:`~sleight.core.element.ElementLike`，可直接
+        喂给 :meth:`click` / :meth:`type`：命中校验走 composed 树，shadow 内的元素也能
+        正确点中，而不是被误判成"被遮挡"。跨多个 open shadow root 深度遍历，遇到 closed
+        shadow root 则无能为力（浏览器本身也访问不到）。
+
+        :param selector: CSS 选择器，在主文档与所有 open shadow root 里一起匹配
+        :param index: 命中多个时取第几个（深度优先顺序）
+        :returns: 元素；没命中返回 ``None``
+        """
+        el = Element(self, selector, index, pierce=True)
+        return el if el.exists() else None
+
     @overload
     def require(self, target: str | Element) -> Element: ...
     @overload
