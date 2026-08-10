@@ -28,6 +28,7 @@ from .core.errors import (
     SleightError,
     StaleRef,
 )
+from .core.extract import ExtractedDocument
 from .core.human import CAREFUL, DEFAULT, FAST, HumanProfile
 from .core.resources import NetworkResource
 from .core.session import Selectable, Session
@@ -69,6 +70,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "Snapshot",
     "SnapshotNode",
     "BackendElement",
+    "ExtractedDocument",
     "NetworkResource",
     "Transport",
     "enable_debug_logging",

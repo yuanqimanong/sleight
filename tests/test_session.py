@@ -1320,6 +1320,58 @@ def test_frame_element_hit_test_fails_when_something_covers_the_iframe():
 
 
 # --------------------------------------------------------------------------- #
+# Extraction
+# --------------------------------------------------------------------------- #
+
+
+def _extract_route(*, content_text, link_density=0.1, page_text="", **extra):
+    """把 Session.extract_document 里几条 Runtime.evaluate 路由掉。"""
+    def route(params):
+        expr = params["expression"]
+        if "content_text" in expr:              # 页内提取脚本
+            data = {
+                "url": "http://x/", "title": "T", "lang": "en", "byline": "A",
+                "excerpt": "E", "site_name": "S", "published": "P", "image": "I",
+                "canonical": "C", "meta": {"author": "A"}, "jsonld": [{"@type": "Article"}],
+                "content_text": content_text, "content_html": "<p>hi</p>",
+                "links": [{"href": "/a", "text": "a"}], "link_density": link_density,
+            }
+            data.update(extra)
+            return {"result": {"value": data}}
+        if "innerText" in expr:                 # text() 回退
+            return {"result": {"value": page_text}}
+        return {"result": {"value": None}}
+    return route
+
+
+def test_extract_document_maps_fields_and_scores_quality():
+    s, t = build()
+    t.results["Runtime.evaluate"] = _extract_route(content_text="word " * 200, link_density=0.1)
+    d = s.extract_document()
+    assert d.title == "T" and d.byline == "A" and d.site_name == "S" and d.lang == "en"
+    assert d.json_ld == [{"@type": "Article"}]
+    assert d.metadata == {"author": "A"} and d.links == [{"href": "/a", "text": "a"}]
+    assert d.char_count > 0 and d.link_density == 0.1
+    assert 0.3 < d.quality <= 1.0 and not d.low_quality
+
+
+def test_extract_flags_low_quality_on_link_heavy_content():
+    s, t = build()
+    t.results["Runtime.evaluate"] = _extract_route(content_text="x" * 900, link_density=0.9)
+    d = s.extract_document()
+    assert d.quality < 0.3 and d.low_quality, "高链接密度应判低质量"
+
+
+def test_extract_falls_back_to_page_text_when_content_too_short():
+    s, t = build()
+    t.results["Runtime.evaluate"] = _extract_route(
+        content_text="tiny", link_density=0.2, page_text="y" * 500
+    )
+    d = s.extract_document(min_length=200)
+    assert d.char_count == 500, "正文过短应回退整页 text()"
+
+
+# --------------------------------------------------------------------------- #
 # Snapshot / Ref
 # --------------------------------------------------------------------------- #
 

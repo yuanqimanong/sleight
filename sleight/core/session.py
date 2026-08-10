@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from .element import Element, ElementLike
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
+from .extract import ExtractedDocument, extract_document
 from .frames import FrameElement, FrameInfo, FrameView, _ContextScope, _SessionScope
 from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
@@ -762,6 +763,17 @@ class Session:
     def content(self) -> str:
         """渲染后的 ``document.documentElement.outerHTML``。"""
         return self.eval("document.documentElement.outerHTML") or ""
+
+    def extract_document(self, *, min_length: int = 200) -> ExtractedDocument:
+        """从当前页面抽取正文与常用字段（标题/作者/摘要/OpenGraph/JSON-LD/正文/链接）。
+
+        在页面内做，零 Python 依赖，吃的是 JS 执行后的最终 DOM（登录后/动态内容都在）。
+        正文走 readability 式密度打分，对中英文都适用；抽不到像样正文时回退整页文本。
+
+        :param min_length: 正文短于该字符数就回退整页 ``text()``
+        :returns: :class:`~sleight.core.extract.ExtractedDocument`
+        """
+        return extract_document(self, min_length=min_length)
 
     def text(self) -> str:
         """``document.body.innerText``。
