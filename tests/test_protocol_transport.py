@@ -247,7 +247,7 @@ def test_transport_rejects_cross_thread_use():
     ):
         boom: list[BaseException] = []
 
-        def other(op=op) -> None:
+        def other(op=op, boom=boom) -> None:
             try:
                 op()
             except BaseException as exc:

@@ -1107,6 +1107,83 @@ def test_domready_is_not_satisfied_by_stale_lifecycle_after_a_click_navigation()
     assert s._loader_id == "L2", "新文档提交后纪元应已切到 L2"
 
 
+# --------------------------------------------------------------------------- #
+# Frame 观察层
+# --------------------------------------------------------------------------- #
+
+
+def _frame_tree() -> dict:
+    """主 frame F1 下挂两个子 frame：同源 SAME、跨源 OOPIF。"""
+    return {
+        "frameTree": {
+            "frame": {"id": "F1", "url": "https://a.example/", "name": None},
+            "childFrames": [
+                {"frame": {"id": "SAME", "url": "https://a.example/box", "name": "box"}},
+                {"frame": {"id": "OOPIF", "url": "https://other.example/ad", "name": "ad"}},
+            ],
+        }
+    }
+
+
+def _with_frames(evaluate=None):
+    s, t = build(evaluate=evaluate)
+    t.results["Page.getFrameTree"] = _frame_tree()
+    # 只给同源子 frame 送执行上下文；OOPIF 在别的进程，主 session 收不到它的上下文
+    t.emit("Runtime.executionContextCreated",
+           {"context": {"id": 7, "auxData": {"frameId": "SAME", "isDefault": True}}})
+    return s, t
+
+
+def test_frames_lists_the_tree_and_flags_reachability():
+    s, _ = _with_frames()
+    frames = {f.frame_id: f for f in s.frames()}
+
+    assert frames["F1"].is_main and frames["F1"].reachable
+    assert frames["SAME"].parent_id == "F1"
+    assert frames["SAME"].name == "box"
+    assert frames["SAME"].reachable, "同源子 frame 有执行上下文，应可达"
+    assert not frames["OOPIF"].reachable, "跨源 OOPIF 没有本 session 的执行上下文，应不可达"
+
+
+def test_frame_reads_into_a_same_origin_child_in_its_own_context():
+    seen: dict = {}
+
+    def evaluate(expr):
+        return "inside" if "innerText" in expr else None
+
+    s, t = _with_frames(evaluate=None)
+    # 记录 Runtime.evaluate 用的 contextId，确认求值落在子 frame 的上下文里
+    def route(params):
+        seen["contextId"] = params.get("contextId")
+        return {"result": {"value": "inside"}}
+    t.results["Runtime.evaluate"] = route
+
+    view = s.frame("box")
+    assert view.text() == "inside"
+    assert seen["contextId"] == 7, "读子 frame 必须落在它自己的 executionContextId 上"
+
+
+def test_frame_into_an_oopif_fails_loudly():
+    s, _ = _with_frames()
+    with pytest.raises(SleightError, match=r"cross-origin|OOPIF"):
+        s.frame("ad")
+
+
+def test_frame_not_found_lists_children():
+    s, _ = _with_frames()
+    with pytest.raises(SleightError, match="no frame matches"):
+        s.frame("nope")
+
+
+def test_execution_context_map_clears_on_navigation():
+    s, t = _with_frames()
+    assert s.frames()  # 触发 drain，把上面的 executionContextCreated 收进映射
+    assert "SAME" in s._frame_contexts
+    t.emit("Runtime.executionContextsCleared", {})
+    s.drain()
+    assert s._frame_contexts == {}, "整页导航后旧的执行上下文映射必须清空"
+
+
 def test_back_and_forward_walk_the_history():
     s, t = build()
     t.results["Page.getNavigationHistory"] = HISTORY

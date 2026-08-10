@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from .element import Element, ElementLike
 from .errors import ElementError, ProtocolError, SleightError, TimeoutError
+from .frames import FrameInfo, FrameView
 from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
@@ -155,6 +156,9 @@ class Session:
         self._loader_id: str | None = None
         self._frame_id: str | None = None
         self._lifecycle: set[str] = set()
+        # frameId -> 该 frame 默认(主)世界的 executionContextId。靠 Runtime.enable 送来的
+        # executionContextCreated 事件维护，用于在同源子 frame 的上下文里求值。
+        self._frame_contexts: dict[str, int] = {}
         self._netidle = NetworkIdleTracker()
         self._track_network = track_network
         # 事件观察者。有了它就不必去 monkeypatch _handle —— 那是私有方法，而且补丁
@@ -319,6 +323,19 @@ class Session:
             loader = frame.get("loaderId") or ""
             if loader and loader != self._loader_id and self._is_root_frame(frame):
                 self._rebind(loader, frame.get("id"))
+        elif ev.method == "Runtime.executionContextCreated":
+            # 维护 frameId -> 默认世界 contextId。只认默认(主)世界，隔离世界不算 ——
+            # 隔离世界看到的是同一个 DOM，但对着它 eval 拿不到页面自己的全局变量。
+            ctx = ev.params.get("context") or {}
+            aux = ctx.get("auxData") or {}
+            fid, cid = aux.get("frameId"), ctx.get("id")
+            if aux.get("isDefault") and fid and cid is not None:
+                self._frame_contexts[fid] = cid
+        elif ev.method == "Runtime.executionContextDestroyed":
+            dead = ev.params.get("executionContextId")
+            self._frame_contexts = {f: c for f, c in self._frame_contexts.items() if c != dead}
+        elif ev.method == "Runtime.executionContextsCleared":
+            self._frame_contexts.clear()
         elif ev.method.startswith("Network."):
             self._netidle.feed(ev)
 
@@ -690,7 +707,7 @@ class Session:
     # ------------------------------------------------------------------ #
 
     def eval(self, expr: str) -> Any:
-        """``Runtime.evaluate``，返回 by-value 的结果。
+        """``Runtime.evaluate``，返回 by-value 的结果（在主 frame 的默认上下文里）。
 
         用 evaluate **读** DOM 是安全的（读不伪造事件）；**写交互不行** —— 那会产生
         ``isTrusted=false`` 且坐标 (0,0) 的假事件。点击一律走 :meth:`click`。
@@ -699,10 +716,21 @@ class Session:
         :returns: by-value 的求值结果；不可序列化的对象得到 ``None``
         :raises ProtocolError: JS 抛异常了
         """
-        r = self.call(
-            "Runtime.evaluate",
-            {"expression": expr, "returnByValue": True, "awaitPromise": True},
-        )
+        return self._evaluate({"expression": expr, "returnByValue": True, "awaitPromise": True})
+
+    def _eval_in_context(self, context_id: int, expr: str) -> Any:
+        """在指定 ``executionContextId`` 里求值 —— 给子 frame 的 :class:`FrameView` 用。
+
+        :param context_id: :attr:`_frame_contexts` 里记下的某个 frame 的默认世界 id
+        :raises ProtocolError: JS 抛异常，或该上下文已随导航失效
+        """
+        return self._evaluate({
+            "expression": expr, "returnByValue": True, "awaitPromise": True,
+            "contextId": context_id,
+        })
+
+    def _evaluate(self, params: dict[str, Any]) -> Any:
+        r = self.call("Runtime.evaluate", params)
         if details := r.get("exceptionDetails"):
             desc = (details.get("exception") or {}).get("description") or details.get("text")
             raise ProtocolError(f"JS exception: {desc}")
@@ -785,6 +813,62 @@ class Session:
             label = f"{selector!r}[{getattr(el, 'index', 0)}]" if selector is not None else repr(el)
             raise ElementError(f"no element matches {label}")
         return el
+
+    # ------------------------------------------------------------------ #
+    # Frame
+    #
+    # query/query_all/Element 只看主 frame 的普通 DOM。下面这层单独把 frame 树暴露出来，
+    # 并支持读进**同源/同进程**子 frame。跨源 OOPIF 会出现在树里但标 reachable=False，
+    # 读它要另开 CDP session（下一步），现在明确 fail，不静默返回空。
+    # ------------------------------------------------------------------ #
+
+    def frames(self) -> list[FrameInfo]:
+        """列出本 target 的整棵 frame 树（含主 frame）。
+
+        每个 :class:`~sleight.core.frames.FrameInfo` 标了 ``reachable``：同源/同进程子
+        frame 为 ``True``（可用 :meth:`frame` 读进去），跨源 OOPIF 为 ``False``。
+
+        :returns: 深度优先顺序的 frame 列表，主 frame 在最前
+        """
+        self.drain()                    # 把已到的 executionContextCreated 收进映射
+        tree = self.call("Page.getFrameTree").get("frameTree") or {}
+        out: list[FrameInfo] = []
+
+        def walk(node: dict[str, Any], parent_id: str | None) -> None:
+            frame = node.get("frame") or {}
+            fid = frame.get("id") or ""
+            out.append(FrameInfo(
+                frame_id=fid,
+                url=frame.get("url") or "",
+                name=frame.get("name"),
+                parent_id=parent_id,
+                is_main=parent_id is None,
+                # 主 frame 天然可达；子 frame 看有没有它的执行上下文（同源才有）
+                reachable=parent_id is None or fid in self._frame_contexts,
+            ))
+            for child in node.get("childFrames") or []:
+                walk(child, fid)
+
+        walk(tree, None)
+        return out
+
+    def frame(self, match: str) -> FrameView:
+        """按 frameId / name / URL 子串定位一个**可达**子 frame，返回只读视图。
+
+        :param match: 精确 frameId、精确 ``name``，或出现在该 frame URL 里的子串
+        :raises SleightError: 没有匹配的 frame，或匹配到的是跨源 OOPIF（尚不支持读入）
+        """
+        candidates = [f for f in self.frames() if not f.is_main]
+        for f in candidates:
+            if match == f.frame_id or match == f.name or (f.url and match in f.url):
+                if not f.reachable:
+                    raise SleightError(
+                        f"frame {match!r} is cross-origin (OOPIF); reading into it needs a "
+                        "separate CDP session, which is not implemented yet"
+                    )
+                return FrameView(self, f, self._frame_contexts[f.frame_id])
+        have = [f.name or f.url or f.frame_id for f in candidates]
+        raise SleightError(f"no frame matches {match!r}; child frames: {have or 'none'}")
 
     # ------------------------------------------------------------------ #
     # 交互

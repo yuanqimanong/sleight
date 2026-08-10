@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
+import shutil
+import socket
+import subprocess
+import tempfile
 import threading
 import time
+import urllib.request
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import pytest
@@ -275,6 +282,101 @@ class FakeSession:
 @pytest.fixture
 def session() -> FakeSession:
     return FakeSession()
+
+
+# --------------------------------------------------------------------------- #
+# 真浏览器基线：一台真的 headless Chromium。没有就 skip，不伪装。
+#
+# 这填的是仓库和方案共同的空白：至今没有一条针对标准 Chromium 的真浏览器测试，
+# CI 从不启动浏览器，90% 覆盖率全建立在 fake transport 上。凡是"真页才能证明对不对"
+# 的东西（跨 frame 坐标、iframe、Snapshot 覆盖率）都必须挂在这里，不能只跑 fake。
+# --------------------------------------------------------------------------- #
+
+
+def _find_chromium() -> str | None:
+    """定位一个标准 Chromium/Chrome 可执行文件。**不是 Cloak** —— 基线要的就是标准内核。"""
+    if (env := os.environ.get("SLEIGHT_TEST_CHROMIUM")):
+        return env if os.path.exists(env) else None
+    for name in ("chromium", "chromium-browser", "google-chrome",
+                 "google-chrome-stable", "chrome"):
+        if (path := shutil.which(name)):
+            return path
+    return None
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="session")
+def live_endpoint() -> Iterator[str]:
+    """启动一台 headless 标准 Chromium，产出它的 CDP HTTP 端点；没有浏览器就 skip。"""
+    chromium = _find_chromium()
+    if chromium is None:
+        pytest.skip("no standard Chromium found (set SLEIGHT_TEST_CHROMIUM to a binary)")
+
+    port = _free_port()
+    profile = tempfile.mkdtemp(prefix="sleight-live-")
+    proc = subprocess.Popen(
+        [
+            chromium, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}", "about:blank",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def cdp_ready() -> bool:
+        try:
+            with urllib.request.urlopen(f"{base}/json/version", timeout=1) as resp:
+                return resp.status == 200 and bool(json.load(resp))
+        except Exception:
+            return False
+
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if cdp_ready():
+                break
+            if proc.poll() is not None:
+                pytest.skip(f"chromium exited early (rc={proc.returncode})")
+            time.sleep(0.2)
+        else:
+            pytest.skip("chromium did not expose CDP within 30s")
+        yield base
+    finally:
+        proc.terminate()
+        with suppress(Exception):
+            proc.wait(timeout=10)
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+@pytest.fixture
+def live_session(live_endpoint: str) -> Iterator[Any]:
+    """连上真浏览器、开一个自己的 tab 的真 Session；用完关掉。"""
+    from sleight import connect
+
+    with connect(live_endpoint) as sess:
+        yield sess
+
+
+@contextmanager
+def serve_pages(pages: dict[str, str]) -> Iterator[str]:
+    """把若干 HTML 写进临时目录，用后即删。返回目录路径；页面用 ``file://`` 打开。
+
+    iframe 用同源 ``file://`` 时，父页里写 ``<iframe src="child.html">`` 即可。
+    """
+    directory = tempfile.mkdtemp(prefix="sleight-pages-")
+    try:
+        for name, html in pages.items():
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write(html)
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def run_threads(fn: Any, n: int, timeout: float = 30.0) -> list[BaseException]:
