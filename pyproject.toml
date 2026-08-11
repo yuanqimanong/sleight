@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sleight"
-version = "0.4.0"
+version = "0.5.0"
 description = "Drive any CDP browser like a human — trajectories, typing rhythm, instance leasing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -60,7 +60,7 @@ sleight-mcp = "sleight.agent.mcp:main"
 Homepage = "https://github.com/yuanqimanong/sleight"
 Repository = "https://github.com/yuanqimanong/sleight"
 Issues = "https://github.com/yuanqimanong/sleight/issues"
-Documentation = "https://github.com/yuanqimanong/sleight/blob/main/docs/%E8%AF%A6%E7%BB%86%E6%96%87%E6%A1%A3%E6%89%8B%E5%86%8C.md"
+Documentation = "https://github.com/yuanqimanong/sleight/wiki"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sleight"]
@@ -70,7 +70,7 @@ artifacts = ["sleight/py.typed"]
 [tool.hatch.build.targets.sdist]
 # 显式白名单。默认会把 .idea/ 和 .claude/settings.local.json 一并打进去，
 # 里面带着开发机的绝对路径。
-include = ["sleight", "tests", "docs", "README.md", "LICENSE", "pyproject.toml"]
+include = ["sleight", "tests", "README.md", "README-zh.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100

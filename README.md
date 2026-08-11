@@ -6,11 +6,15 @@ browser instance pools.
 
 Python ≥ 3.11 · one runtime dependency (`websocket-client`) · MIT
 
-📖 **[中文文档手册](docs/详细文档手册.md)** — 安装、快速开始、实战场景、CloakBrowser Manager 部署
-🚀 **[部署与运维 CLI](docs/部署与运维%20CLI.md)** — 一条命令把 Manager 部署到本机或远程
+**[中文 README](README-zh.md)** · 📖 **[Wiki — full documentation](https://github.com/yuanqimanong/sleight/wiki)**
 
 ```bash
-pip install sleight
+pip install sleight                     # core: one dependency
+pip install "sleight[xpath]"            # + lxml, for parse(xpath=True)
+pip install "sleight[ui]"               # + fastapi/uvicorn, for `sleight ui`
+pip install "sleight[redis]"            # + redis, cross-process leasing
+
+sleight browser install fingerprint-chromium   # optional: an anti-detect kernel
 ```
 
 ## 30 seconds
@@ -73,7 +77,7 @@ s.drag_and_drop("#card", "#done-column")     # HTML5 native drag, or a JS one �
 Rotate the exit IP. The tunnel hands out addresses per TCP connection and Chrome
 reuses keep-alive sockets, so a whole run pins to one IP. A fresh browser context is
 the only thing that reliably breaks that — clearing cache, unique query strings, and
-`emulateNetworkConditions` all do nothing ([why](docs/详细文档手册.md)):
+`emulateNetworkConditions` all do nothing ([why](https://github.com/yuanqimanong/sleight/wiki/常见问题)):
 
 ```python
 with inst.context() as ctx, ctx.session() as s:   # own socket pool → new exit
