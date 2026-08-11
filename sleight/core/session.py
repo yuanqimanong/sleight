@@ -937,15 +937,26 @@ class Session:
             frame = node.get("frame") or {}
             fid = frame.get("id") or ""
             url = frame.get("url") or ""
-            if parent_id is None:
+            is_main = parent_id is None
+            if is_main:
                 main_id = fid
+            # 主 frame 天然可达；子 frame 看有没有它的执行上下文（同源才有）
+            reachable = is_main or fid in self._frame_contexts
+
+            # 跨源子 frame 在 getFrameTree 里常先冒出一个**空 url 的占位项**（真实 url 要等
+            # Target.getTargets 注册）。占位项没有任何可用信息 —— 没 url 就 attach 不了、
+            # 读不了 —— 列出来只会让调用方拿到一个"有 OOPIF 但用不了"的半成品，
+            # 也会让"等 OOPIF 就绪"的轮询提前退出。跳过它，等下面 getTargets 那条真的。
+            if not (is_main or url or reachable):
+                for child in node.get("childFrames") or []:
+                    walk(child, fid)
+                return
+
             if url:
                 seen_urls.add(url)
             out.append(FrameInfo(
                 frame_id=fid, url=url, name=frame.get("name"),
-                parent_id=parent_id, is_main=parent_id is None,
-                # 主 frame 天然可达；子 frame 看有没有它的执行上下文（同源才有）
-                reachable=parent_id is None or fid in self._frame_contexts,
+                parent_id=parent_id, is_main=is_main, reachable=reachable,
             ))
             for child in node.get("childFrames") or []:
                 walk(child, fid)

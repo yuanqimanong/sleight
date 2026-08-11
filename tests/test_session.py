@@ -1134,6 +1134,29 @@ def _with_frames(evaluate=None):
     return s, t
 
 
+def test_frames_skips_the_empty_url_oopif_placeholder():
+    """跨源子 frame 在 getFrameTree 里会先冒一个空 url 的占位项（真 url 要等 getTargets）。
+
+    列出来会让调用方拿到一个 attach 不了、读不了的半成品，也会让"等 OOPIF 就绪"的轮询
+    提前退出（CI 上实测到的时序 bug）。占位项要跳过，只认 getTargets 那条带 url 的。
+    """
+    s, t = build()
+    t.results["Page.getFrameTree"] = {"frameTree": {
+        "frame": {"id": "F1", "url": "https://a.example/", "name": None},
+        "childFrames": [{"frame": {"id": "OOPIF", "url": "", "name": None}}],   # 占位项
+    }}
+    # getTargets 还没注册 → 只有主 frame，不报一个用不了的 OOPIF
+    assert [f.frame_id for f in s.frames()] == ["F1"]
+
+    # getTargets 注册之后 → 出现带真实 url 的那条
+    t.results["Target.getTargets"] = {"targetInfos": [
+        {"type": "iframe", "targetId": "T-AD", "url": "https://other.example/ad"},
+    ]}
+    frames = s.frames()
+    assert [f.frame_id for f in frames] == ["F1", "T-AD"]
+    assert frames[1].url == "https://other.example/ad" and not frames[1].reachable
+
+
 def test_frames_lists_the_tree_and_flags_reachability():
     s, _ = _with_frames()
     frames = {f.frame_id: f for f in s.frames()}

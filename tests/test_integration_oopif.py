@@ -35,10 +35,14 @@ def _pages(port: int) -> dict[str, str]:
 
 
 def _load_with_oopif(live_session, port):
+    """等到 OOPIF **可用**为止 —— 光有条目不够，得有 url 才 attach 得了。"""
     live_session.open(f"http://127.0.0.1:{port}/parent.html", wait=Selector("#cap"))
     for _ in range(25):
         live_session.pump_events(0.2)
-        oopifs = [f for f in live_session.frames() if not f.is_main and not f.reachable]
+        oopifs = [
+            f for f in live_session.frames()
+            if not f.is_main and not f.reachable and f.url
+        ]
         if oopifs:
             return oopifs
     return []
