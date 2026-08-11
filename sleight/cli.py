@@ -786,6 +786,74 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 浏览器内核
+# --------------------------------------------------------------------------- #
+
+
+def cmd_browser_ls(args: argparse.Namespace) -> int:
+    from .browsers import KERNELS, installed
+
+    _out("可装的内核：")
+    for kernel in KERNELS.values():
+        _out(f"  {kernel.name:<24} {kernel.note}")
+        _out(f"  {'':<24} 来源 github.com/{kernel.repo}")
+    have = installed()
+    _out()
+    if not have:
+        _out("已装：（无）—— sleight browser install fingerprint-chromium")
+        return EXIT_OK
+    _out("已装：")
+    for entry in have:
+        _out(f"  {entry['name']:<24} {entry['version']:<20} {entry['path']}")
+    return EXIT_OK
+
+
+def cmd_browser_install(args: argparse.Namespace) -> int:
+    from .browsers import install
+
+    last = [-1]
+
+    def progress(done: int, total: int) -> None:
+        pct = int(done * 100 / total) if total else 0
+        if pct != last[0] and pct % 5 == 0:          # 每 5% 打一次，别刷屏
+            last[0] = pct
+            mb = done / 1e6
+            _err(f"  下载中 {pct:3d}%  {mb:6.1f} MB")
+
+    _err(f"安装 {args.name} …（第三方二进制，见 sleight/browsers.py 的供应链说明）")
+    try:
+        path = install(args.name, version=args.version, force=args.force, on_progress=progress)
+    except SleightError as exc:
+        _err(f"失败：{exc}")
+        return EXIT_ERROR
+    _out(str(path))
+    _err(f"完成。现在可以 launch({args.name!r}, fingerprint=42) 或 LocalLauncher({args.name!r})")
+    return EXIT_OK
+
+
+def cmd_browser_path(args: argparse.Namespace) -> int:
+    from .browsers import installed_path
+
+    path = installed_path(args.name)
+    if path is None:
+        _err(f"{args.name} 没装 —— sleight browser install {args.name}")
+        return EXIT_ERROR
+    _out(str(path))
+    return EXIT_OK
+
+
+def cmd_browser_rm(args: argparse.Namespace) -> int:
+    from .browsers import uninstall
+
+    removed = uninstall(args.name, args.version)
+    if not removed:
+        _err(f"{args.name} 没有可删的版本")
+        return EXIT_ERROR
+    _out(f"已删除 {args.name}：{', '.join(removed)}")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # 参数
 # --------------------------------------------------------------------------- #
 
@@ -997,6 +1065,25 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("profile", nargs="?")
     pp.set_defaults(func=cmd_profiles_stop)
     p.set_defaults(func=lambda a: (_err("用 sleight profiles ls|create|launch|stop"), EXIT_USAGE)[1])
+
+    # —— 浏览器内核 ——
+    p = add("browser", "下载/管理浏览器内核（类似 playwright install）")
+    bsub = p.add_subparsers(dest="browser_command", metavar="<子命令>")
+    bp = bsub.add_parser("ls", help="列出可装的内核和已装的版本")
+    bp.set_defaults(func=cmd_browser_ls)
+    bp = bsub.add_parser("install", help="下载并安装一个内核（幂等，装过直接返回）")
+    bp.add_argument("name", nargs="?", default="fingerprint-chromium", help="内核名")
+    bp.add_argument("--version", metavar="TAG", help="指定 Release tag，默认最新")
+    bp.add_argument("--force", action="store_true", help="已装也重装")
+    bp.set_defaults(func=cmd_browser_install)
+    bp = bsub.add_parser("path", help="打印已装内核的可执行文件路径")
+    bp.add_argument("name", nargs="?", default="fingerprint-chromium")
+    bp.set_defaults(func=cmd_browser_path)
+    bp = bsub.add_parser("rm", help="删掉已装的内核")
+    bp.add_argument("name")
+    bp.add_argument("--version", metavar="TAG", help="只删这个版本，默认全删")
+    bp.set_defaults(func=cmd_browser_rm)
+    p.set_defaults(func=lambda a: (_err("用 sleight browser ls|install|path|rm"), EXIT_USAGE)[1])
 
     # —— 界面 ——
     p = add("ui", "启动 Web 界面（需要 pip install \"sleight[ui]\"）")

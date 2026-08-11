@@ -52,16 +52,28 @@ def _free_port(host: str) -> int:
 def _resolve_binary(binary: str) -> str:
     """把 ``binary`` 解析成一个真实可执行文件路径。
 
-    带路径分隔符或本身存在的当作路径；否则去 ``PATH`` 上找。
+    顺序：显式路径 → **已装的内核名**（``sleight browser install`` 装的，见
+    :mod:`sleight.browsers`）→ ``PATH``。所以 ``LocalLauncher("fingerprint-chromium")``
+    装过之后就能直接用，不必写绝对路径。
     """
     if os.sep in binary or (os.altsep and os.altsep in binary) or os.path.exists(binary):
         if not os.path.exists(binary):
             raise InstanceError(f"browser binary not found: {binary!r}")
         return binary
-    found = shutil.which(binary)
-    if not found:
-        raise InstanceError(f"browser binary {binary!r} not found on PATH")
-    return found
+
+    from ..browsers import KERNELS
+    from ..browsers import resolve as resolve_kernel
+
+    if (installed := resolve_kernel(binary)) is not None:
+        return installed
+    if (found := shutil.which(binary)) is not None:
+        return found
+    if binary in KERNELS:
+        raise InstanceError(
+            f"browser kernel {binary!r} is not installed — run "
+            f"`sleight browser install {binary}` (or pass an absolute path)"
+        )
+    raise InstanceError(f"browser binary {binary!r} not found on PATH")
 
 
 log = logging.getLogger("sleight.provider")
