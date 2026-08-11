@@ -40,6 +40,7 @@ from .resources import (
     ResourceTracker,
 )
 from .snapshot import Snapshot, build_snapshot
+from .static import StaticElement, parse_html
 from .transport import Transport
 from .types import Box, ClearReport, Condition, DomReady, Point, StorageType
 
@@ -68,6 +69,30 @@ EXIT_IP_ENDPOINTS = (
 
 #: 无字段的 frozen dataclass，共享一个实例即可（也让 ruff B008 满意）
 _DEFAULT_WAIT = DomReady()
+
+#: 递归序列化整棵 DOM，并把 **open Shadow DOM** 内容内联进 host（shadow 子节点排在 light
+#: 子节点前面）—— 让 :meth:`Session.parse` 的静态树也能查到 shadow 里的元素。给 outerHTML
+#: 加一层：普通 ``document.documentElement.outerHTML`` 不含 shadow 内容。
+_DEEP_HTML_JS = r"""
+(() => {
+  const VOID = new Set(['area','base','br','col','embed','hr','img','input','link',
+    'meta','param','source','track','wbr']);
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const ser = node => {
+    if (node.nodeType === 3) return esc(node.nodeValue);
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase();
+    let attrs = '';
+    for (const a of node.attributes) attrs += ` ${a.name}="${esc(a.value)}"`;
+    if (VOID.has(tag)) return `<${tag}${attrs}>`;
+    let inner = '';
+    if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) inner += ser(c);
+    for (const c of node.childNodes) inner += ser(c);
+    return `<${tag}${attrs}>${inner}</${tag}>`;
+  };
+  return ser(document.documentElement);
+})()
+"""
 
 #: :meth:`Session.clear_site_data` 的默认清理范围。**只清 cookie 是不够的** ——
 #: 反检测服务的设备标识在 localStorage / indexedDB 里都有副本，会立刻把 cookie 还原
@@ -763,6 +788,21 @@ class Session:
     def content(self) -> str:
         """渲染后的 ``document.documentElement.outerHTML``。"""
         return self.eval("document.documentElement.outerHTML") or ""
+
+    def parse(self, *, pierce_shadow: bool = False) -> StaticElement:
+        """把当前页面 HTML 取一次、解析成**离线可查**的静态树，用于批量只读。
+
+        实时 :meth:`query` / :class:`~sleight.core.element.Element` 每次查找/读属性都要 CDP
+        往返；要一次读很多元素（表格、列表、卡片流）时，用它一次 :meth:`content` + 之后
+        纯内存 CSS 查询，能快一个数量级。查到目标后若要点击/输入，再用同一个 CSS 回到
+        实时 :meth:`query`。
+
+        :param pierce_shadow: 把 open Shadow DOM 内容也内联进来一起查（DrissionPage 的静态
+            树做不到）。多一次页面内 DOM 序列化，默认关
+        :returns: 静态树根（``#document``）
+        """
+        html = (self.eval(_DEEP_HTML_JS) or "") if pierce_shadow else self.content()
+        return parse_html(html)
 
     def extract_document(self, *, min_length: int = 200) -> ExtractedDocument:
         """从当前页面抽取正文与常用字段（标题/作者/摘要/OpenGraph/JSON-LD/正文/链接）。
