@@ -250,6 +250,22 @@ def _error(mid: Any, code: int, message: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+_NO_BROWSER_HINT = (
+    "set SLEIGHT_CDP_URL=http://host:port (existing browser) or "
+    "SLEIGHT_BROWSER=<binary> (launch one) before starting the MCP server"
+)
+
+
+def _check_env() -> None:
+    """启动时就确认配了浏览器来源。
+
+    **不能等到第一次 tools/call 才报** —— Gateway 是懒创建的，MCP host 里配错环境变量
+    会表现成"server 起来了、什么都不说、然后静默退出"，日志里毫无线索。宁可启动即失败。
+    """
+    if not (os.environ.get("SLEIGHT_CDP_URL") or os.environ.get("SLEIGHT_BROWSER")):
+        raise SystemExit(_NO_BROWSER_HINT)
+
+
 def _gateway_from_env() -> Gateway:
     """按环境变量连/起一个浏览器并包成 Gateway。"""
     from .gateway import Gateway
@@ -277,16 +293,14 @@ def _gateway_from_env() -> Gateway:
         transport = Transport.connect(ep.ws_url, headers=dict(ep.headers))
         session = Session.create(transport)
     else:
-        raise SystemExit(
-            "set SLEIGHT_CDP_URL=http://host:port (existing browser) or "
-            "SLEIGHT_BROWSER=<binary> (launch one) before starting the MCP server"
-        )
+        raise SystemExit(_NO_BROWSER_HINT)
     allow_raw = os.environ.get("SLEIGHT_ALLOW_RAW") == "1"
     return Gateway(session, allow_raw=allow_raw)
 
 
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    _check_env()                     # 配错就当场退出，别静默起一个永远连不上浏览器的 server
     MCPServer(_gateway_from_env).serve_stdio()
 
 

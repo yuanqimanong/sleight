@@ -108,6 +108,66 @@ with pool.lease(where=lambda i: "us" in i.tags) as inst:
     ...
 ```
 
+## Driving it from an LLM
+
+Compress the page into something a model can read, and get a stable ref back for every
+interactable element. Clicking a ref goes through the same human input chain — real
+`isTrusted` events, both hit tests, everything:
+
+```python
+snap = s.snapshot()
+print(snap.text())
+# RootWebArea "Checkout"
+#   heading "Your order"
+#   textbox "Card number" [e1]
+#   button "Pay now" [e2]
+
+s.type(snap.ref("e1"), "4242 4242 4242 4242")
+s.click(snap.ref("e2"))
+```
+
+Refs are keyed by `(loaderId, backendNodeId)`: the same node keeps the same ref across
+snapshots, and every ref dies the moment the page navigates (`StaleRef`) rather than
+silently pointing at whatever now sits in that slot. Same-process iframes are merged in,
+so an element inside an iframe gets a ref like any other.
+
+Pull the article and the usual fields out of the rendered DOM — no lxml, no Node:
+
+```python
+doc = s.extract_document()
+doc.title, doc.byline, doc.text[:80], doc.json_ld, doc.low_quality
+```
+
+Reading a lot of elements? Take one static snapshot and query it in memory instead of
+paying a CDP round-trip per element (~18× faster on a 50-row table):
+
+```python
+dom = s.parse()                                   # one fetch, then pure Python
+names = [e.text for e in dom.query_all("tr.row td.name")]
+deep  = s.parse(pierce_shadow=True)               # open shadow DOM inlined too
+```
+
+Launch a local browser yourself — any Chromium build, including an anti-detect one.
+Same seed, same fingerprint, every run:
+
+```python
+from sleight import launch
+
+with launch("fingerprint-chromium", fingerprint=42) as s:
+    s.open("https://example.com")
+```
+
+And the whole thing is an **MCP server**, so a model can drive it directly:
+
+```bash
+SLEIGHT_CDP_URL=http://127.0.0.1:9222 sleight-mcp
+```
+
+It speaks JSON-RPC over stdio with no extra dependencies and exposes four tools —
+`browser_session` / `browser_observe` (snapshot + find) / `browser_act` (by ref *or* by
+coordinate, for canvas and icon-only UIs) / `browser_extract`. Raw CDP and `eval` stay
+hidden unless you opt in.
+
 ## Getting a fleet to drive
 
 The hard part of running CloakBrowser is not the driving — it is the deployment, the
@@ -160,8 +220,8 @@ sleight fills exactly that gap: **Python + remote CDP + human behaviour + instan
 ## Relationship to Playwright
 
 **Not a replacement — a complement.** sleight is a driver layer, not a framework.
-It deliberately does not do iframes/OOPIF, downloads, video, tracing, or a full
-locator DSL. When you need those, use Playwright.
+It deliberately does not do downloads, video, tracing, or a full locator DSL.
+When you need those, use Playwright.
 
 The interesting part is that you can use both: sleight's `human` module is
 [sans-io](https://sans-io.readthedocs.io/) — it emits `(method, params, sleep_after)`
@@ -200,9 +260,12 @@ cooperative exclusive leasing with TTL renewal (in-memory, or Redis-backed acros
 processes) · idempotent recovery · deploying and operating CloakBrowser Manager over
 local docker or SSH, extensions included.
 
-**Does not:** data extraction · scheduling and queues · fingerprint spoofing (that is
-the browser's job) · iframe / OOPIF / Shadow DOM piercing · strict fencing · WebDriver
-BiDi · Firefox.
+**Also does** (the LLM-facing layer, see below): **iframe / OOPIF / Shadow DOM piercing** ·
+accessibility **snapshots with stable refs** · main-content and metadata **extraction** ·
+a four-tool **agent gateway** and an **MCP server** · launching a local browser binary.
+
+**Does not:** scheduling and queues · fingerprint spoofing (that is the browser's job —
+sleight drives one, see `LocalLauncher`) · strict fencing · WebDriver BiDi · Firefox.
 
 The deploy layer lives in its own subpackage and is never imported by `import sleight`,
 so the driver stays a one-dependency library.
@@ -223,10 +286,10 @@ Measured, not assumed. Each of these cost someone a day to find out:
 
 Ordered by what actually blocks work, not by size.
 
-- **iframe / frame support** — `s.frames()`, `with s.frame(sel) as fs:`. The one real
-  gap. CAPTCHAs live in iframes (DataDome's does), so `drag` and element screenshots —
-  both shipped — still cannot reach a slider inside one. Needs a frame tree,
-  cross-frame coordinate mapping, and a separate session per OOPIF.
+- ~~**iframe / frame support**~~ — **shipped.** `s.frames()`, `s.frame(sel)`,
+  `s.frame_element(iframe, sel)`, cross-origin OOPIF via its own CDP session, and
+  `s.snapshot()` merges same-process frames so elements inside an iframe get refs you
+  can click directly. The DataDome-style slider inside an iframe is reachable now.
 - **Context vs. lightweight-instance resource numbers** — memory, CPU, and time-to-ready
   for *instance with proxy+plugin* / *bare instance* / *N contexts in one instance*.
   Nobody should redesign their concurrency around contexts without this table, so the

@@ -136,3 +136,19 @@ def test_serve_stdio_reads_lines_and_reports_parse_errors():
     parsed = [json.loads(x) for x in lines]
     assert parsed[0]["error"]["code"] == -32700          # 坏 JSON
     assert parsed[1]["result"] == {}                     # ping
+
+
+def test_env_check_fails_fast_when_no_browser_is_configured(monkeypatch):
+    """配错环境变量必须启动即失败。Gateway 是懒创建的，等到第一次 tools/call 才报，
+    在 MCP host 里就表现成"起来了、什么都不说、然后静默退出"，日志里毫无线索。"""
+    import pytest
+
+    from sleight.agent.mcp import _check_env
+
+    monkeypatch.delenv("SLEIGHT_CDP_URL", raising=False)
+    monkeypatch.delenv("SLEIGHT_BROWSER", raising=False)
+    with pytest.raises(SystemExit, match="SLEIGHT_CDP_URL"):
+        _check_env()
+
+    monkeypatch.setenv("SLEIGHT_CDP_URL", "http://127.0.0.1:9222")
+    _check_env()                       # 配了就不抛

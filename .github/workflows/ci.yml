@@ -1,7 +1,8 @@
 # 日常 CI。发布工作流只在打 tag 时跑，所以测试要靠这个 —— 发布前才发现挂了很难受。
 #
-# 集成测试（需要真浏览器 / 真 CloakBrowser Manager）会被 pytest 自动 skip，
-# 这里跑的是全部单测。
+# test 矩阵跑单测（假 transport，不开浏览器）；browser job 单独跑**真浏览器**集成测试
+# （iframe/OOPIF/Shadow/Snapshot/Ref/Gateway/MCP 这些只有真页面能证明的东西）。
+# 需要真 CloakBrowser Manager 的那批仍会 skip —— 那要商业组件，CI 上没有。
 
 name: ci
 
@@ -49,6 +50,39 @@ jobs:
       - name: pytest
         run: uv run pytest -q
 
+  browser:
+    name: 真浏览器集成
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
+      # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      # runner 镜像自带 Google Chrome；找不到就**让 job 红**，而不是让集成测试
+      # 静默 skip 出一个绿勾 —— "跑了 0 条真浏览器测试的绿 CI"正是我们要消灭的东西
+      - name: 定位浏览器
+        run: |
+          BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$BROWSER" || { echo "no browser on this runner"; exit 1; }
+          echo "SLEIGHT_TEST_CHROMIUM=$BROWSER" >> "$GITHUB_ENV"
+          "$BROWSER" --version
+
+      # 收集数为 0 同样判红：marker 写错、文件改名都会让它悄悄变成空跑
+      - name: 确认有集成用例可跑
+        run: |
+          N="$(uv run pytest -m integration --collect-only -q 2>/dev/null | grep -c '::' || true)"
+          echo "collected $N integration tests"
+          test "$N" -gt 0 || { echo "no integration tests collected"; exit 1; }
+
+      - name: 真浏览器测试
+        run: uv run pytest -m integration -q
+
   lint:
     name: ruff
     runs-on: ubuntu-latest
@@ -92,14 +126,18 @@ jobs:
           cd /tmp
           /tmp/probe/bin/python -c "
           import sleight
-          from sleight import connect, Pool, Session, NetworkResource, FAST
-          from sleight.providers import CloakBrowserManager, ProfileSpec, Plain
+          from sleight import connect, launch, Pool, Session, NetworkResource, FAST
+          from sleight import Snapshot, BackendElement, StaticElement, ExtractedDocument, StaleRef
+          from sleight.providers import CloakBrowserManager, ProfileSpec, Plain, LocalLauncher, Region
+          from sleight.agent import Gateway, MCPServer
           from sleight.lease import MemoryLease
           from sleight.core.human import mouse_path, DEFAULT
           from sleight.core.types import Box, Point
+          from sleight.core.static import parse_html
           from random import Random
           assert mouse_path(Point(0, 0), Box(400, 300, 120, 40), rng=Random(1), profile=DEFAULT)
-          assert ProfileSpec.windows_us('x').viewport_height == 947
+          assert ProfileSpec.windows('x', Region.HK).timezone == 'Asia/Hong_Kong'
+          assert parse_html('<p id=a>hi</p>').query('#a').text == 'hi'
           print('smoke ok', sleight.__version__)
           "
 
@@ -121,3 +159,6 @@ jobs:
           "
           # 探针环境没装 [ui]，所以这里不会真的起服务；要的是那句人话而不是 traceback
           /tmp/probe/bin/sleight ui 2>&1 | grep -q 'sleight\[ui\]'
+          # MCP server 的 console script 装上了没有。没给浏览器时它该给一句人话就退出，
+          # 不是 traceback —— MCP host 里配错了环境变量就是这个场景
+          /tmp/probe/bin/sleight-mcp 2>&1 </dev/null | grep -q 'SLEIGHT_CDP_URL'
