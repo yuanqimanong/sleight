@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from sleight.core.static import StaticElement as StaticElementType
 from sleight.core.static import parse_html
 
 _HTML = """<html><body>
@@ -84,3 +85,74 @@ def test_bad_selector_raises():
     d = parse_html("<div></div>")
     with pytest.raises(ValueError, match="bad selector"):
         d.query_all("!!!")
+
+
+# --------------------------------------------------------------------------- #
+# XPath（可选 lxml 后端）
+# --------------------------------------------------------------------------- #
+
+lxml_only = pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["util"]).find_spec("lxml") is None,
+    reason='needs pip install "sleight[xpath]"',
+)
+
+
+def test_xpath_without_the_lxml_backend_says_how_to_enable_it():
+    from sleight.core.errors import SleightError
+
+    dom = parse_html(_HTML)                       # 零依赖那条
+    with pytest.raises(SleightError, match="parse\\(xpath=True\\)"):
+        dom.xpath("//li")
+
+
+@lxml_only
+def test_xpath_returns_elements_and_string_values():
+    dom = parse_html(_HTML, xpath=True)
+
+    rows = dom.xpath("//li[@class='row']")
+    assert len(rows) == 2                          # class="row hot" 不等于 'row'
+    assert all(isinstance(r, StaticElementType) for r in rows)
+    assert rows[0].text == "Alpha"
+
+    texts = dom.xpath("//li//a/text()")            # text() -> str
+    assert texts == ["Alpha", "Beta", "Gamma"]
+
+    hrefs = dom.xpath("//a/@href")                 # @attr -> str
+    assert hrefs == ["/a", "/b", "/c", "/x"]
+
+
+@lxml_only
+def test_xpath_supports_what_the_css_subset_cannot():
+    dom = parse_html(_HTML, xpath=True)
+    # contains() + 位置谓词 + 轴 —— CSS 子集都表达不了
+    assert len(dom.xpath("//li[contains(@class,'row')]")) == 3
+    assert dom.xpath("//ul/li[2]")[0].text == "Beta"
+    assert dom.xpath("//li[last()]")[0].text == "Gamma"
+    assert dom.xpath("//input/preceding-sibling::ul")[0].tag == "ul"
+
+
+@lxml_only
+def test_xpath_is_relative_to_the_element_it_is_called_on():
+    dom = parse_html(_HTML, xpath=True)
+    main = dom.query("#main")
+    assert len(main.xpath(".//a")) == 3, "相对本元素：footer 的 a 不算"
+    assert len(dom.xpath("//a")) == 4, "文档级：footer 的 a 也算"
+
+
+@lxml_only
+def test_css_semantics_are_identical_on_both_backends():
+    plain, lx = parse_html(_HTML), parse_html(_HTML, xpath=True)
+    for selector in ("li.row", "#main a", "ul.list > li", "[href^=/]", "a, input", "li.row.hot"):
+        assert len(plain.query_all(selector)) == len(lx.query_all(selector)), selector
+        assert [e.text for e in plain.query_all(selector)] == \
+               [e.text for e in lx.query_all(selector)], selector
+    assert plain.query("p").text == lx.query("p").text == "some bold text"
+
+
+@lxml_only
+def test_lxml_backed_tree_still_walks_parents_and_children():
+    dom = parse_html(_HTML, xpath=True)
+    row = dom.xpath("//li[@data-k='2']")[0]
+    assert row.parent.tag == "ul"
+    assert row.query("a").attr("href") == "/b"
+    assert row.attr("data-k") == "2"

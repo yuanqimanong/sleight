@@ -26,6 +26,9 @@ dependencies = ["websocket-client>=1.9"]
 
 [project.optional-dependencies]
 redis = ["redis>=5"]
+# session.parse(xpath=True) 用 lxml 建静态树，好跑 XPath。内建的 CSS 子集零依赖，
+# 只有要 XPath（轴、位置谓词、contains() 这些）时才需要装它。
+xpath = ["lxml>=5"]
 # 部署功能的引擎和 CLI 只用标准库；这个 extra 只是 sleight ui 那个 Web 界面要的。
 ui = ["fastapi>=0.115", "uvicorn>=0.30"]
 # redis / fakeredis 进 dev：不装的话 tests/test_lease_redis.py 连 import 都过不去。
@@ -43,6 +46,8 @@ dev = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "httpx>=0.27",
+    # xpath extra 的测试要它；没装的话那几条会 skip，但 CI 应当真跑
+    "lxml>=5",
 ]
 
 [project.scripts]

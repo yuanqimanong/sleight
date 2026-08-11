@@ -789,20 +789,22 @@ class Session:
         """渲染后的 ``document.documentElement.outerHTML``。"""
         return self.eval("document.documentElement.outerHTML") or ""
 
-    def parse(self, *, pierce_shadow: bool = False) -> StaticElement:
+    def parse(self, *, pierce_shadow: bool = False, xpath: bool = False) -> StaticElement:
         """把当前页面 HTML 取一次、解析成**离线可查**的静态树，用于批量只读。
 
         实时 :meth:`query` / :class:`~sleight.core.element.Element` 每次查找/读属性都要 CDP
         往返；要一次读很多元素（表格、列表、卡片流）时，用它一次 :meth:`content` + 之后
-        纯内存 CSS 查询，能快一个数量级。查到目标后若要点击/输入，再用同一个 CSS 回到
+        纯内存查询，能快一个数量级。查到目标后若要点击/输入，再用同一个选择器回到
         实时 :meth:`query`。
 
-        :param pierce_shadow: 把 open Shadow DOM 内容也内联进来一起查（DrissionPage 的静态
-            树做不到）。多一次页面内 DOM 序列化，默认关
+        :param pierce_shadow: 把 open Shadow DOM 内容也内联进来一起查。多一次页面内 DOM
+            序列化，默认关
+        :param xpath: 用 lxml 建树，让 :meth:`StaticElement.xpath` 可用（需要
+            ``pip install "sleight[xpath]"``）。CSS/text/attr 行为不变，默认关
         :returns: 静态树根（``#document``）
         """
         html = (self.eval(_DEEP_HTML_JS) or "") if pierce_shadow else self.content()
-        return parse_html(html)
+        return parse_html(html, xpath=xpath)
 
     def extract_document(self, *, min_length: int = 200) -> ExtractedDocument:
         """从当前页面抽取正文与常用字段（标题/作者/摘要/OpenGraph/JSON-LD/正文/链接）。
