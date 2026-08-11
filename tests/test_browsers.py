@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -69,7 +70,10 @@ def offline(monkeypatch):
 def test_install_downloads_unpacks_and_records_a_manifest(offline, home):
     path = browsers.install("fingerprint-chromium")
     assert path.is_file() and path.name == "chrome"
-    assert path.stat().st_mode & 0o111, "解包后应可执行"
+    # 执行位只在 POSIX 上有意义。Windows 没有这个概念（install 本身也只在非 Windows chmod），
+    # 而这套用例是把平台 mock 成 linux 跑的，真跑在 Windows 时不能断言它。
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o111, "解包后应可执行"
 
     manifest = json.loads((path.parents[1] / "manifest.json").read_text())
     assert manifest["kernel"] == "fingerprint-chromium"
