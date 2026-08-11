@@ -287,9 +287,10 @@ Measured, not assumed. Each of these cost someone a day to find out:
 Ordered by what actually blocks work, not by size.
 
 - ~~**iframe / frame support**~~ — **shipped.** `s.frames()`, `s.frame(sel)`,
-  `s.frame_element(iframe, sel)`, cross-origin OOPIF via its own CDP session, and
-  `s.snapshot()` merges same-process frames so elements inside an iframe get refs you
-  can click directly. The DataDome-style slider inside an iframe is reachable now.
+  `s.frame_element(iframe, sel)`, and `s.snapshot()` merges child frames — both
+  same-process *and* cross-origin OOPIFs (each via its own CDP session, with the
+  parent-page offset applied) — so elements inside any iframe get refs you can click
+  directly. The DataDome-style slider inside an iframe is reachable now.
 - **Context vs. lightweight-instance resource numbers** — memory, CPU, and time-to-ready
   for *instance with proxy+plugin* / *bare instance* / *N contexts in one instance*.
   Nobody should redesign their concurrency around contexts without this table, so the
