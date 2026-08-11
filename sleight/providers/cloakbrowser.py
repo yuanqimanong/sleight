@@ -13,6 +13,7 @@ import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, Literal
 
 from ..core.errors import InstanceError, NotFound, NotReady
@@ -21,7 +22,7 @@ from .base import HTTPProvider
 
 log = logging.getLogger("sleight.cloakbrowser")
 
-__all__ = ["CLEAR", "UNSET", "CloakBrowserManager", "ProfileSpec"]
+__all__ = ["CLEAR", "UNSET", "CloakBrowserManager", "ProfileSpec", "Region"]
 
 
 class _Sentinel:
@@ -93,6 +94,55 @@ API = "/api/profiles"
 
 Platform = Literal["windows", "macos", "linux"]
 
+
+class Region(StrEnum):
+    """地区 —— 锁定**时区 + 语言**这一对。
+
+    时区和语言必须配套：``Asia/Hong_Kong`` 配 ``en-US`` 不是不可能，但它把"这台机器在
+    哪"这件事讲成了两个答案，是反检测最容易抓的矛盾之一。这个枚举把这一对绑死，平台
+    （Windows/macOS/Linux）和 GPU 则由平台工厂负责 —— 两件事正交，分开选。
+
+        >>> ProfileSpec.windows("hk-01", region=Region.HK)
+        >>> ProfileSpec.macos("dev", region=Region.US_WEST)
+    """
+
+    US_EAST = "us_east"
+    US_WEST = "us_west"
+    UK = "uk"
+    DE = "de"
+    HK = "hk"
+    SG = "sg"
+    JP = "jp"
+    CN = "cn"
+
+    @property
+    def timezone(self) -> str:
+        """IANA 时区名。"""
+        return _REGIONS[self][0]
+
+    @property
+    def locale(self) -> str:
+        """BCP-47 语言标记。"""
+        return _REGIONS[self][1]
+
+    @property
+    def label(self) -> str:
+        """给人看的名字（CLI / Web UI 用）。"""
+        return _REGIONS[self][2]
+
+
+#: ``Region`` -> ``(时区, 语言, 中文标签)``。同一台机器上真会出现的组合。
+_REGIONS: dict[Region, tuple[str, str, str]] = {
+    Region.US_EAST: ("America/New_York", "en-US", "美国东部"),
+    Region.US_WEST: ("America/Los_Angeles", "en-US", "美国西部"),
+    Region.UK: ("Europe/London", "en-GB", "英国"),
+    Region.DE: ("Europe/Berlin", "de-DE", "德国"),
+    Region.HK: ("Asia/Hong_Kong", "zh-HK", "中国香港"),
+    Region.SG: ("Asia/Singapore", "en-SG", "新加坡"),
+    Region.JP: ("Asia/Tokyo", "ja-JP", "日本"),
+    Region.CN: ("Asia/Shanghai", "zh-CN", "中国大陆"),
+}
+
 #: 常见分辨率。不在表里只是警告 —— 罕见分辨率本身就是熵，不一定是错
 COMMON_RESOLUTIONS = frozenset(
     {(1920, 1080), (2560, 1440), (1536, 864), (1366, 768), (1440, 900), (3840, 2160), (1680, 1050)}
@@ -115,6 +165,13 @@ _GPU = {
         "Google Inc. (Mesa)",
         "ANGLE (Mesa, llvmpipe (LLVM 15.0.7, 256 bits), OpenGL 4.5)",
     ),
+}
+
+#: 每个平台的默认 GPU，以及该平台**允许**的 GPU（跨平台的组合会被 validate 拦下）。
+_PLATFORM_GPU: dict[Platform, tuple[str, tuple[str, ...]]] = {
+    "windows": ("windows-nvidia", ("windows-nvidia", "windows-intel")),
+    "macos": ("macos-apple", ("macos-apple",)),
+    "linux": ("linux-mesa", ("linux-mesa",)),
 }
 
 
@@ -175,42 +232,57 @@ class ProfileSpec:
     # ---------------------------- 预设 -------------------------------- #
 
     @classmethod
-    def windows_us(cls, name: str, **kw: Any) -> ProfileSpec:
-        """Windows + ``America/New_York`` + ``en-US`` + NVIDIA RTX 3070 (D3D11)。
+    def windows(
+        cls, name: str, region: Region = Region.US_EAST, *, gpu: str | None = None, **kw: Any
+    ) -> ProfileSpec:
+        """Windows + 指定地区 + NVIDIA RTX 3070（``gpu="windows-intel"`` 换 Intel UHD 630）。
 
         :param name: profile 名，在 Manager 内唯一
+        :param region: :class:`Region` 之一，锁定时区 + 语言。默认美国东部
+        :param gpu: :data:`_GPU` 的键，只能选本平台的；``None`` 用平台默认
         :param kw: 覆盖任意字段，例如 ``proxy=`` / ``tags=`` / ``fingerprint_seed=``
-        :raises ValueError: 覆盖出了自相矛盾的组合
+        :raises ValueError: 地区/GPU 不认识，或覆盖出了自相矛盾的组合
         """
-        return cls._preset(name, "windows", "America/New_York", "en-US", "windows-nvidia", kw)
+        return cls._preset(name, "windows", region, gpu, kw)
 
     @classmethod
-    def windows_hk(cls, name: str, **kw: Any) -> ProfileSpec:
-        """Windows + ``Asia/Hong_Kong`` + ``zh-HK`` + Intel UHD 630。参数同
-        :meth:`windows_us`。"""
-        return cls._preset(name, "windows", "Asia/Hong_Kong", "zh-HK", "windows-intel", kw)
+    def macos(
+        cls, name: str, region: Region = Region.US_EAST, *, gpu: str | None = None, **kw: Any
+    ) -> ProfileSpec:
+        """macOS + 指定地区 + Apple M2 Metal。参数同 :meth:`windows`。"""
+        return cls._preset(name, "macos", region, gpu, kw)
 
     @classmethod
-    def macos_us(cls, name: str, **kw: Any) -> ProfileSpec:
-        """macOS + ``America/Los_Angeles`` + ``en-US`` + Apple M2 Metal。参数同
-        :meth:`windows_us`。"""
-        return cls._preset(name, "macos", "America/Los_Angeles", "en-US", "macos-apple", kw)
-
-    @classmethod
-    def linux_us(cls, name: str, **kw: Any) -> ProfileSpec:
-        """Linux + ``America/New_York`` + ``en-US`` + Mesa llvmpipe。参数同
-        :meth:`windows_us`。"""
-        return cls._preset(name, "linux", "America/New_York", "en-US", "linux-mesa", kw)
+    def linux(
+        cls, name: str, region: Region = Region.US_EAST, *, gpu: str | None = None, **kw: Any
+    ) -> ProfileSpec:
+        """Linux + 指定地区 + Mesa llvmpipe。参数同 :meth:`windows`。"""
+        return cls._preset(name, "linux", region, gpu, kw)
 
     @classmethod
     def _preset(
-        cls, name: str, platform: Platform, tz: str, locale: str, gpu: str, kw: dict[str, Any]
+        cls, name: str, platform: Platform, region: Region | str,
+        gpu: str | None, kw: dict[str, Any],
     ) -> ProfileSpec:
         """预设的价值就在这：**保证指纹自洽**。
 
         平台、时区、语言、GPU 串必须是同一台机器上可能出现的组合。
-        ``platform="windows"`` 配一串 Apple Metal 的 renderer 是一眼就会被标记的矛盾。
+        ``platform="windows"`` 配一串 Apple Metal 的 renderer 是一眼就会被标记的矛盾；
+        ``Asia/Hong_Kong`` 配 ``en-US`` 则是"这台机器在哪"讲成了两个答案。平台工厂管
+        前者，:class:`Region` 管后者。
         """
+        try:
+            region = Region(region)
+        except ValueError:
+            raise ValueError(
+                f"unknown region {region!r}; expected one of {', '.join(r.value for r in Region)}"
+            ) from None
+        default_gpu, allowed = _PLATFORM_GPU[platform]
+        gpu = gpu or default_gpu
+        if gpu not in allowed:
+            raise ValueError(
+                f"gpu={gpu!r} is not a {platform} GPU; expected one of {', '.join(allowed)}"
+            )
         vendor, renderer = _GPU[gpu]
         defaults: dict[str, Any] = {
             "platform": platform,
@@ -219,38 +291,38 @@ class ProfileSpec:
         }
         # geoip=True 时不要预填时区/语言，让出口 IP 说了算
         if not kw.get("geoip"):
-            defaults["timezone"] = tz
-            defaults["locale"] = locale
+            defaults["timezone"] = region.timezone
+            defaults["locale"] = region.locale
         spec = cls(name=name, **{**defaults, **kw})
         spec.validate()
         return spec
 
     @classmethod
-    def randomized(cls, name: str, preset: str = "windows_us", **kw: Any) -> ProfileSpec:
-        """一个预设 + 一个**现摇的指纹种子**。要"每个实例一个全新身份"就用它。
+    def randomized(
+        cls, name: str, platform: Platform = "windows",
+        region: Region = Region.US_EAST, **kw: Any,
+    ) -> ProfileSpec:
+        """一个平台/地区组合 + 一个**现摇的指纹种子**。要"每个实例一个全新身份"就用它。
 
             >>> specs = [ProfileSpec.randomized(f"scrape-{i:02d}") for i in range(10)]
 
-        等价于 ``ProfileSpec.windows_us(name, fingerprint_seed="random")``，只是把
-        这件容易忘的事摆到名字上。
+        等价于 ``ProfileSpec.windows(name, fingerprint_seed="random")``，只是把这件容易
+        忘的事摆到名字上。
 
         :param name: profile 名
-        :param preset: ``windows_us`` / ``windows_hk`` / ``macos_us`` / ``linux_us``
+        :param platform: ``windows`` / ``macos`` / ``linux``
+        :param region: :class:`Region` 之一
         :param kw: 覆盖任意字段
         :returns: 已校验的 spec
-        :raises ValueError: 预设名不认识，或覆盖出了自相矛盾的组合
+        :raises ValueError: 平台/地区不认识，或覆盖出了自相矛盾的组合
         """
-        factory = {
-            "windows_us": cls.windows_us, "windows_hk": cls.windows_hk,
-            "macos_us": cls.macos_us, "linux_us": cls.linux_us,
-        }.get(preset)
+        factory = {"windows": cls.windows, "macos": cls.macos, "linux": cls.linux}.get(platform)
         if factory is None:
             raise ValueError(
-                f"unknown preset {preset!r}; expected one of "
-                "windows_us / windows_hk / macos_us / linux_us"
+                f"unknown platform {platform!r}; expected one of windows / macos / linux"
             )
         kw.setdefault("fingerprint_seed", "random")
-        return factory(name, **kw)
+        return factory(name, region, **kw)
 
     def replace(self, **kw: Any) -> ProfileSpec:
         """派生一个改了若干字段的新 spec，原对象不变。**不做校验** ——

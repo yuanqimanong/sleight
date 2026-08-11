@@ -399,7 +399,7 @@ def test_templates_lists_both_kinds(capsys):
     assert cli.main(["templates"]) == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "standard" in out and "private-net" in out
-    assert "windows_us" in out and "America/New_York" in out
+    assert "windows" in out and "America/New_York" in out
     assert "shm 5gb" in out                       # 说清每档到底是什么，而不是只有名字
 
 
@@ -460,14 +460,15 @@ def test_profiles_create_uses_the_preset(capsys, target, monkeypatch):
     capsys.readouterr()
 
     assert cli.main([
-        "profiles", "create", "news-hk-01", "--host", "h", "--preset", "windows_hk",
+        "profiles", "create", "news-hk-01", "--host", "h", "--preset", "windows",
+        "--region", "hk",
         "--tags", "hk,news", "--screen", "1366x768",
     ]) == cli.EXIT_OK
 
     spec = seen["spec"]
     assert spec.platform == "windows" and spec.timezone == "Asia/Hong_Kong"
     assert spec.locale == "zh-HK"
-    assert "Intel" in spec.gpu_renderer          # 和 platform 自洽
+    assert "NVIDIA" in spec.gpu_renderer         # GPU 归平台管，和 platform 自洽
     assert spec.tags == ("hk", "news")
     assert (spec.screen_width, spec.screen_height) == (1366, 768)
     assert spec.auto_launch is False, "建实例不该顺手拉起一个浏览器占内存"

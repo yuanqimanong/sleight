@@ -710,7 +710,7 @@ const planPanel = (plan) => card("体检与变更",
  * 9. 实例
  * ========================================================================== */
 
-const newProfile = { name: "", preset: "windows_us", proxy: "", tags: "",
+const newProfile = { name: "", preset: "windows", region: "us_east", proxy: "", tags: "",
                      geoip: false, headless: false, screen: "1920x1080" };
 
 function profilesView() {
@@ -741,7 +741,16 @@ const newProfileCard = () => h("details", { class: "card" },
       "aria-pressed": String(newProfile.preset === p.key),
       onclick: () => { newProfile.preset = p.key; render(); },
     }, h("b", null, p.label), h("span", { class: "s1" }, p.summary),
-       h("span", { class: "s2" }, `${p.platform} · ${p.timezone} · ${p.locale}`)))),
+       h("span", { class: "s2" }, `${p.platform} · GPU ${p.gpu ? "已锁定" : "默认"}`)))),
+  h("div", { class: "sub", style: "margin-bottom:6px" },
+    "地区决定时区与语言 —— 两者必须配套，否则「这台机器在哪」会讲出两个答案"),
+  h("div", { class: "pick", style: "margin-bottom:16px" },
+    (S.defaults.profile_regions || []).map((r) =>
+      h("button", {
+        "aria-pressed": String(newProfile.region === r.key),
+        onclick: () => { newProfile.region = r.key; render(); },
+      }, h("b", null, r.label), h("span", { class: "s1" }, r.timezone),
+         h("span", { class: "s2" }, r.locale)))),
   h("div", { class: "grid2" },
     h("div", null,
       field("profile_name", { value: newProfile.name, placeholder: "news-us-01",
@@ -764,7 +773,7 @@ async function createProfile() {
   const [width, height] = (newProfile.screen || "1920x1080").split("x").map(Number);
   try {
     const created = await api(url("/profiles"), { method: "POST", body: {
-      name: newProfile.name.trim(), preset: newProfile.preset,
+      name: newProfile.name.trim(), preset: newProfile.preset, region: newProfile.region,
       proxy: newProfile.proxy.trim(), tags: newProfile.tags,
       geoip: newProfile.geoip, headless: newProfile.headless,
       screen_width: width || 1920, screen_height: height || 1080 } });

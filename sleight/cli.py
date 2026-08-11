@@ -29,6 +29,7 @@ from .deploy.presets import (
     DEPLOY_TEMPLATES,
     FIELD_HELP,
     PROFILE_PRESETS,
+    profile_regions,
     profile_spec_from,
 )
 from .deploy.runner import Runner, describe
@@ -715,6 +716,7 @@ def cmd_templates(args: argparse.Namespace) -> int:
         _dump({
             "deploy_templates": [t.to_dict() for t in DEPLOY_TEMPLATES],
             "profile_presets": [p.to_dict() for p in PROFILE_PRESETS],
+            "profile_regions": profile_regions(),
             "help": {k: v.to_dict() for k, v in FIELD_HELP.items()},
         })
         return EXIT_OK
@@ -724,11 +726,14 @@ def cmd_templates(args: argparse.Namespace) -> int:
         _out(f"               {t.detail}")
     _out("\n\n实例身份模板（profiles create 的 --preset）")
     _out("  预设的价值是**保证指纹自洽**：平台、时区、语言、GPU 串必须是同一台机器上")
-    _out("  可能出现的组合。")
+    _out("  可能出现的组合。平台定 GPU，地区定时区+语言，两者正交。")
     for p in PROFILE_PRESETS:
         d = p.to_dict()
         _out(f"\n  {d['key']:12} {d['label']} —— {d['summary']}")
-        _out(f"               {d['platform']} · {d['timezone']} · {d['locale']}")
+        _out(f"               {d['platform']} · {d['gpu']}")
+    _out("\n\n地区（profiles create 的 --region）")
+    for r in profile_regions():
+        _out(f"  {r['key']:10} {r['label']:8} {r['timezone']:22} {r['locale']}")
     return EXIT_OK
 
 
@@ -737,7 +742,7 @@ def cmd_profiles_create(args: argparse.Namespace) -> int:
     dep = _deployer(args)
     width, _, height = (args.screen or "1920x1080").partition("x")
     spec = profile_spec_from(
-        args.preset, args.name,
+        args.preset, args.name, args.region,
         proxy=args.proxy, geoip=args.geoip, headless=args.headless,
         notes=args.notes, tags=tuple(t.strip() for t in (args.tags or "").split(",") if t.strip()),
         screen_width=int(width or 1920), screen_height=int(height or 1080),
@@ -745,7 +750,7 @@ def cmd_profiles_create(args: argparse.Namespace) -> int:
     )
     with dep.connect() as mgr:
         info = mgr.ensure_profile(spec)
-    _record(dep, "profile-create", ok=True, detail=f"{info.name}（{args.preset}）")
+    _record(dep, "profile-create", ok=True, detail=f"{info.name}（{args.preset}/{args.region}）")
     if args.json:
         _dump({"id": info.id, "name": info.name, "tags": sorted(info.tags)})
     else:
@@ -970,9 +975,12 @@ def build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=cmd_profiles_ls)
     pp = psub.add_parser("create", help="按身份模板建一个实例", parents=[target])
     pp.add_argument("name", help="实例名，Manager 里唯一")
-    pp.add_argument("--preset", default="windows_us",
+    pp.add_argument("--preset", default="windows",
                     choices=[x.key for x in PROFILE_PRESETS],
-                    help="身份模板：决定平台/时区/语言/GPU 串，必须自洽（默认 windows_us）")
+                    help="平台模板：决定平台与 GPU 串（默认 windows）")
+    pp.add_argument("--region", default="us_east",
+                    choices=[r["key"] for r in profile_regions()],
+                    help="地区：决定时区与语言，二者必须配套（默认 us_east）")
     pp.add_argument("--proxy", metavar="URL", help="socks5://user:pass@host:port")
     pp.add_argument("--tags", metavar="A,B", help="逗号分隔，Pool 靠它路由")
     pp.add_argument("--screen", default="1920x1080", metavar="WxH")

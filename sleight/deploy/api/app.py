@@ -29,7 +29,13 @@ from ..engine import Deployer
 from ..errors import DeployError
 from ..ops import ExtensionOps, ProfileOps, extension_paths
 from ..preflight import parse_mem_total_kb
-from ..presets import DEPLOY_TEMPLATES, FIELD_HELP, PROFILE_PRESETS, profile_spec_from
+from ..presets import (
+    DEPLOY_TEMPLATES,
+    FIELD_HELP,
+    PROFILE_PRESETS,
+    profile_regions,
+    profile_spec_from,
+)
 from ..spec import DEFAULT_IMAGE, DeploySpec
 from ..store import Deployment, Host, Store
 
@@ -270,6 +276,7 @@ def create_app(*, token: str | None = None) -> Any:
             # 模板和字段解释只在后端定义一份，前端渲染它
             "deploy_templates": [t.to_dict() for t in DEPLOY_TEMPLATES],
             "profile_presets": [p.to_dict() for p in PROFILE_PRESETS],
+            "profile_regions": profile_regions(),
             "help": {k: v.to_dict() for k, v in FIELD_HELP.items()},
         }
 
@@ -587,7 +594,8 @@ def create_app(*, token: str | None = None) -> Any:
             if body.get(key):
                 overrides[key] = int(body[key])
         spec = wrap(lambda: profile_spec_from(
-            str(body.get("preset") or "windows_us"), profile_name, **overrides
+            str(body.get("preset") or "windows"), profile_name,
+            str(body.get("region") or "us_east"), **overrides
         ))
         dep, _ = deployer(_ref(name, deployment))
 

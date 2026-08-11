@@ -82,7 +82,7 @@ from sleight.providers import CloakBrowserManager, ProfileSpec
 mgr = CloakBrowserManager("http://127.0.0.1:39217")   # 用隧道打印的那个端口
                                                      # token 从 SLEIGHT_CLOAK_TOKEN 读
 
-info = mgr.ensure_profile(ProfileSpec.windows_us("hk-01", proxy=os.environ["PROXY"]))
+info = mgr.ensure_profile(ProfileSpec.windows("hk-01", proxy=os.environ["PROXY"]))
 with mgr.lease(instance_id=info.id) as inst, inst.session(human=True) as s:
     s.open("https://example.com")
     print(s.title())
@@ -186,13 +186,13 @@ sleight rollback --host hk-01          # 回到状态文件里记的上一个镜
 
 ```bash
 sleight profiles ls     --host hk-01
-sleight profiles create news-hk-01 --host hk-01 --preset windows_hk --proxy "$PROXY"
+sleight profiles create news-hk-01 --host hk-01 --preset windows --region hk --proxy "$PROXY"
 sleight profiles launch news-hk-01 --host hk-01     # 名字是位置参数
 sleight profiles stop   news-hk-01 --host hk-01
 sleight profiles stop   --host hk-01                # 不给名字 = 全停
 ```
 
-`--preset` 只有 `windows_us` / `windows_hk` / `macos_us` / `linux_us` 四个 —— 它们的
+`--preset` 只有 `windows` / `macos` / `linux` 三个（定平台与 GPU），`--region` 定时区与语言 —— 它们的
 价值是**保证指纹自洽**（平台、时区、语言、GPU 串得是同一台机器上可能出现的组合）。
 
 冷启动一个实例约 **70 秒**（含 Xvnc 拉起），别以为卡住了。

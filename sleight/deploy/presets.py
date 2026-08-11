@@ -237,33 +237,44 @@ class ProfilePreset:
         sample = getattr(ProfileSpec, self.factory)("sample")
         return {
             "key": self.key, "label": self.label, "summary": self.summary,
-            "platform": sample.platform, "timezone": sample.timezone,
-            "locale": sample.locale, "gpu": sample.gpu_renderer,
+            "platform": sample.platform, "gpu": sample.gpu_renderer,
         }
 
 
+#: 身份模板 = **平台**。时区/语言由 :data:`PROFILE_REGIONS` 单独选 —— 两件事正交。
 PROFILE_PRESETS: tuple[ProfilePreset, ...] = (
-    ProfilePreset("windows_us", "Windows / 美国", "最常见的访客画像", "windows_us"),
-    ProfilePreset("windows_hk", "Windows / 香港", "中文站点或亚太出口", "windows_hk"),
-    ProfilePreset("macos_us", "macOS / 美国", "需要 Safari 之外的 Mac 画像时", "macos_us"),
-    ProfilePreset("linux_us", "Linux / 美国", "Mesa 软渲染，画像最不常见", "linux_us"),
+    ProfilePreset("windows", "Windows", "最常见的访客画像", "windows"),
+    ProfilePreset("macos", "macOS", "需要 Mac 画像时", "macos"),
+    ProfilePreset("linux", "Linux", "Mesa 软渲染，画像最不常见", "linux"),
 )
 
 
-def profile_spec_from(preset: str, name: str, **overrides: Any) -> Any:
-    """按模板造一个 ``ProfileSpec``。
+def profile_regions() -> list[dict[str, str]]:
+    """所有可选地区（给 CLI / Web UI 用）：key + 中文标签 + 时区 + 语言。"""
+    from ..providers.cloakbrowser import Region
 
-    :param preset: :data:`PROFILE_PRESETS` 里的 key
+    return [
+        {"key": r.value, "label": r.label, "timezone": r.timezone, "locale": r.locale}
+        for r in Region
+    ]
+
+
+def profile_spec_from(preset: str, name: str, region: str | None = None, **overrides: Any) -> Any:
+    """按平台模板 + 地区造一个 ``ProfileSpec``。
+
+    :param preset: :data:`PROFILE_PRESETS` 里的 key（``windows`` / ``macos`` / ``linux``）
     :param name: 实例名
+    :param region: :func:`profile_regions` 里的 key；``None`` 用默认（美国东部）
     :param overrides: 覆盖任意字段（proxy / tags / geoip / headless …）
     :returns: :class:`~sleight.providers.ProfileSpec`
-    :raises ValueError: 没这个模板，或覆盖出了自相矛盾的组合
+    :raises ValueError: 没这个模板/地区，或覆盖出了自相矛盾的组合
     """
-    from ..providers.cloakbrowser import ProfileSpec
+    from ..providers.cloakbrowser import ProfileSpec, Region
 
     chosen = next((p for p in PROFILE_PRESETS if p.key == preset), None)
     if chosen is None:
         known = ", ".join(p.key for p in PROFILE_PRESETS)
         raise ValueError(f"unknown profile preset {preset!r}; known: {known}")
     clean = {k: v for k, v in overrides.items() if v not in (None, "", (), [])}
-    return getattr(ProfileSpec, chosen.factory)(name, **clean)
+    args = (Region(region),) if region else ()
+    return getattr(ProfileSpec, chosen.factory)(name, *args, **clean)

@@ -111,7 +111,7 @@ def test_acceptance_site_still_reachable(mgr: CloakBrowserManager):
 
 def test_profile_spec_round_trip(mgr: CloakBrowserManager):
     """建 → 查 → 幂等 ensure → 删。用 auto_launch=False，不打扰在跑的实例。"""
-    spec = ProfileSpec.windows_us("sleight-spec-test", proxy=None, tags=("sleight-test",))
+    spec = ProfileSpec.windows("sleight-spec-test", proxy=None, tags=("sleight-test",))
     created = mgr.create_profile(spec)
     try:
         assert created.name == "sleight-spec-test"

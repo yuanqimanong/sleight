@@ -30,6 +30,7 @@ from sleight.providers.cloakbrowser import (
     UNSET,
     CloakBrowserManager,
     ProfileSpec,
+    Region,
 )
 from sleight.providers.plain import Plain
 
@@ -387,13 +388,13 @@ def test_ensure_profile_creates_when_the_name_is_new(monkeypatch: pytest.MonkeyP
         ("GET", "/api/profiles"): (200, []),
         ("POST", "/api/profiles"): (200, PROFILE_STOPPED),
     })
-    info = mgr.ensure_profile(ProfileSpec.windows_us("Win-US"))
+    info = mgr.ensure_profile(ProfileSpec.windows("Win-US"))
     assert info.id == "p1"
     assert http.bodies("POST", "/api/profiles")[0]["name"] == "Win-US"    # type: ignore[index]
 
 
 def test_ensure_profile_is_a_noop_when_nothing_differs(monkeypatch: pytest.MonkeyPatch):
-    spec = ProfileSpec.windows_us("Win-US")
+    spec = ProfileSpec.windows("Win-US")
     existing = {**PROFILE_STOPPED, **spec.to_payload(), "tags": []}
     mgr, http = manager(monkeypatch, {("GET", "/api/profiles"): (200, [existing])})
     mgr.ensure_profile(spec)
@@ -407,7 +408,7 @@ def test_ensure_profile_pushes_a_retag(monkeypatch: pytest.MonkeyPatch):
     排除在 diff 之外就会导致**改了 tag 重跑完全不发 PUT**，重新打标的 profile 继续
     被旧谓词选中。
     """
-    spec = ProfileSpec.windows_us("Win-US", tags=("sg",))
+    spec = ProfileSpec.windows("Win-US", tags=("sg",))
     existing = {**PROFILE_STOPPED, **spec.to_payload(),
                 "tags": [{"tag": "us", "color": "#f00"}]}
     mgr, http = manager(monkeypatch, {
@@ -420,7 +421,7 @@ def test_ensure_profile_pushes_a_retag(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_ensure_profile_pushes_a_changed_proxy(monkeypatch: pytest.MonkeyPatch):
-    spec = ProfileSpec.windows_us("Win-US", proxy="socks5://u:p@hk.example:3000")
+    spec = ProfileSpec.windows("Win-US", proxy="socks5://u:p@hk.example:3000")
     existing = {**PROFILE_STOPPED, **spec.to_payload(), "proxy": "socks5://old:1080", "tags": []}
     mgr, http = manager(monkeypatch, {
         ("GET", "/api/profiles"): (200, [existing]),
@@ -435,7 +436,7 @@ def test_create_profile_can_launch_right_away(monkeypatch: pytest.MonkeyPatch):
         ("POST", "/api/profiles"): (200, PROFILE_STOPPED),
         ("GET", "/api/profiles/p1/status"): ST_RUNNING,
     })
-    info = mgr.create_profile(ProfileSpec.windows_us("Win-US"), launch=True)
+    info = mgr.create_profile(ProfileSpec.windows("Win-US"), launch=True)
     assert info.ready is True
     assert "/api/profiles/p1/status" in http.paths("GET")
 
@@ -830,15 +831,20 @@ def test_a_random_seed_is_drawn_at_payload_time():
 
 
 def test_randomized_picks_a_preset_and_a_seed():
-    spec = ProfileSpec.randomized("scrape-01", "windows_hk")
+    spec = ProfileSpec.randomized("scrape-01", "windows", Region.HK)
     assert spec.fingerprint_seed == "random"
     assert spec.timezone == "Asia/Hong_Kong"
     assert isinstance(spec.to_payload()["fingerprint_seed"], int)
 
 
-def test_randomized_rejects_an_unknown_preset():
-    with pytest.raises(ValueError, match="unknown preset"):
-        ProfileSpec.randomized("x", "windows_jp")
+def test_randomized_rejects_an_unknown_platform():
+    with pytest.raises(ValueError, match="unknown platform"):
+        ProfileSpec.randomized("x", "solaris")
+
+
+def test_randomized_rejects_an_unknown_region():
+    with pytest.raises(ValueError, match="unknown region"):
+        ProfileSpec.randomized("x", "windows", "mars")
 
 
 def test_a_misspelled_random_is_caught_not_sent():

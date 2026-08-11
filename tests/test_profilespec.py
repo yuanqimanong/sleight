@@ -8,7 +8,7 @@ from sleight.providers.cloakbrowser import ProfileSpec
 
 
 def test_preset_is_self_consistent():
-    s = ProfileSpec.windows_us("Win-US-01")
+    s = ProfileSpec.windows("Win-US-01")
     assert s.platform == "windows"
     assert s.timezone == "America/New_York" and s.locale == "en-US"
     assert "NVIDIA" in (s.gpu_renderer or "")
@@ -16,7 +16,7 @@ def test_preset_is_self_consistent():
 
 
 def test_macos_preset_never_gets_a_direct3d_string():
-    s = ProfileSpec.macos_us("Mac-US-01")
+    s = ProfileSpec.macos("Mac-US-01")
     assert "Metal" in (s.gpu_renderer or "")
     assert "Direct3D" not in (s.gpu_renderer or "")
 
@@ -43,7 +43,7 @@ def test_geoip_without_proxy_has_nothing_to_derive_from():
 
 
 def test_geoip_preset_skips_timezone_and_locale():
-    s = ProfileSpec.windows_us("g", geoip=True, proxy="socks5://u:p@h:1")
+    s = ProfileSpec.windows("g", geoip=True, proxy="socks5://u:p@h:1")
     assert s.timezone is None and s.locale is None
 
 
@@ -63,7 +63,7 @@ def test_uncommon_resolution_warns_but_does_not_fail():
 
 def test_payload_shape_matches_the_manager_api():
     """字段名对齐 Manager 的 ProfileCreate；None 丢掉，tags 转 [{tag}]。"""
-    s = ProfileSpec.windows_us("Win-US-02", proxy="socks5://u:p@hk:3000", tags=("us", "prod"))
+    s = ProfileSpec.windows("Win-US-02", proxy="socks5://u:p@hk:3000", tags=("us", "prod"))
     p = s.to_payload()
 
     assert p["name"] == "Win-US-02"
@@ -80,7 +80,62 @@ def test_viewport_height_matches_measured_offset():
 
 
 def test_replace_returns_a_new_spec():
-    a = ProfileSpec.windows_us("a")
+    a = ProfileSpec.windows("a")
     b = a.replace(name="b", headless=True)
     assert a.name == "a" and not a.headless
     assert b.name == "b" and b.headless
+
+
+# --------------------------------------------------------------------------- #
+# 平台 × 地区（3 个平台工厂 + Region 枚举）
+# --------------------------------------------------------------------------- #
+
+
+def test_region_locks_timezone_and_locale_together():
+    from sleight.providers.cloakbrowser import Region
+
+    hk = ProfileSpec.windows("hk", Region.HK)
+    assert (hk.timezone, hk.locale) == ("Asia/Hong_Kong", "zh-HK")
+    jp = ProfileSpec.linux("jp", Region.JP)
+    assert (jp.timezone, jp.locale) == ("Asia/Tokyo", "ja-JP")
+    # 同一地区换平台，时区/语言不变，变的是平台与 GPU
+    assert ProfileSpec.macos("m", Region.HK).timezone == "Asia/Hong_Kong"
+
+
+def test_platform_decides_the_gpu_not_the_region():
+    from sleight.providers.cloakbrowser import Region
+
+    assert "NVIDIA" in ProfileSpec.windows("a", Region.HK).gpu_renderer
+    assert "Apple" in ProfileSpec.macos("b", Region.HK).gpu_renderer
+    assert "Mesa" in ProfileSpec.linux("c", Region.HK).gpu_renderer
+
+
+def test_gpu_can_be_overridden_within_the_platform():
+    assert "Intel" in ProfileSpec.windows("a", gpu="windows-intel").gpu_renderer
+
+
+def test_cross_platform_gpu_is_rejected():
+    with pytest.raises(ValueError, match="not a windows GPU"):
+        ProfileSpec.windows("a", gpu="macos-apple")
+
+
+def test_unknown_region_is_rejected():
+    with pytest.raises(ValueError, match="unknown region"):
+        ProfileSpec.windows("a", "atlantis")
+
+
+def test_every_region_produces_a_self_consistent_spec():
+    from sleight.providers.cloakbrowser import Region
+
+    for region in Region:
+        for factory in (ProfileSpec.windows, ProfileSpec.macos, ProfileSpec.linux):
+            spec = factory("x", region)          # 工厂内部会 validate()，矛盾组合会抛
+            assert spec.timezone == region.timezone and spec.locale == region.locale
+            assert region.label                   # 每个地区都有中文标签给 UI 用
+
+
+def test_geoip_still_leaves_timezone_and_locale_to_the_proxy():
+    from sleight.providers.cloakbrowser import Region
+
+    s = ProfileSpec.windows("g", Region.HK, geoip=True, proxy="socks5://u:p@h:1")
+    assert s.timezone is None and s.locale is None
