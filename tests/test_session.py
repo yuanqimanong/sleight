@@ -1480,6 +1480,22 @@ def test_snapshot_merges_same_process_child_frame():
     assert "ChildBtn" not in flat, "cross_frame=False 不应合并 iframe 内容"
 
 
+def test_snapshot_ref_dispatches_backend_vs_oopif_by_descriptor():
+    from sleight.core.snapshot import BackendElement, OopifElement, Snapshot, SnapshotNode
+
+    s, _ = build()
+    snap = Snapshot(
+        s, SnapshotNode("RootWebArea", ""),
+        {"e1": 9, "e2": ("oopif", "SUB-1", 10, 6)}, s._loader_id,
+    )
+    same = snap.ref("e1")
+    assert isinstance(same, BackendElement)
+
+    oop = snap.ref("e2")
+    assert isinstance(oop, OopifElement)
+    assert oop._sub_sid == "SUB-1" and oop._iframe_backend == 10 and oop._backend == 6
+
+
 def test_snapshot_does_not_descend_oopif_that_fails():
     s, t = build()
     main = {"nodes": [

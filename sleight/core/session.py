@@ -190,7 +190,7 @@ class Session:
         self._oopif_sessions: dict[str, str] = {}
         # Snapshot Ref 分配表：(loaderId, backendNodeId) -> ref。同节点跨快照拿同一个 ref；
         # 页面导航后 loaderId 变，旧 key 自然不再命中（旧 Ref 也随之判为 stale）。
-        self._ref_registry: dict[tuple[str | None, int], str] = {}
+        self._ref_registry: dict[tuple[str | None, Any, int], str] = {}
         self._ref_counter = 0
         self._netidle = NetworkIdleTracker()
         self._track_network = track_network
@@ -1079,8 +1079,10 @@ class Session:
         nodes = self.call("Accessibility.getFullAXTree").get("nodes") or []
         generation = self._loader_id
 
-        def ref_for(backend_node_id: int) -> str:
-            key = (generation, backend_node_id)
+        def ref_for(frame_key: Any, backend_node_id: int) -> str:
+            # frame_key 让不同 frame 里恰好相同的 backendNodeId（OOPIF 子 session 各自编号）
+            # 也拿到不同 Ref；同一节点跨快照仍是同一个 Ref
+            key = (generation, frame_key, backend_node_id)
             ref = self._ref_registry.get(key)
             if ref is None:
                 self._ref_counter += 1

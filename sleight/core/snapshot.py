@@ -13,16 +13,20 @@ Ref 解析出的 :class:`BackendElement` 满足 :class:`~sleight.core.element.El
 ``session.click`` / ``type`` 就复用现有拟人轨迹 + 双重命中校验 + 真实输入（``isTrusted=true``），
 一行输入代码都不用改——这正是先抽 ElementLike 的意义。
 
-作用域（v1）：主 frame 的 AX 树。跨 frame（iframe/OOPIF）合并采集是明确的下一步，可复用
-已建好的 frame 栈；本版对 iframe 内节点不发 Ref，不伪装已覆盖。
+跨 frame：``snapshot(cross_frame=True)`` 默认把子 frame 合并进来 —— **同进程** iframe 用主
+session 的 backendNodeId（坐标已拍平，:class:`BackendElement` 直接可点），**跨源 OOPIF** 用它
+子 session 的 backendNodeId（:class:`OopifElement`，子 session + 父页偏移）。两种在树里一样带
+Ref，不用手动切 frame。
 """
 
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .element import composed_hit_body
 from .errors import ElementError, ProtocolError, SleightError, StaleRef
 from .types import Box
 
@@ -89,11 +93,13 @@ class Snapshot:
     """
 
     def __init__(
-        self, session: Session, root: SnapshotNode, refs: dict[str, int], generation: str | None
+        self, session: Session, root: SnapshotNode, refs: dict[str, Any], generation: str | None
     ) -> None:
         self._session = session
         self.root = root
-        self._refs = refs                 # ref -> backendNodeId
+        # ref -> 描述符：int = 主/同进程 backendNodeId（BackendElement）；
+        #                ("oopif", sub_sid, iframe_backend, backend) = 跨源（OopifElement）
+        self._refs = refs
         self.generation = generation       # 取快照时的 loaderId
 
     def __repr__(self) -> str:
@@ -108,8 +114,9 @@ class Snapshot:
         """本快照里所有可交互元素的 Ref。"""
         return list(self._refs)
 
-    def ref(self, ref: str) -> BackendElement:
-        """把一个 Ref 解析成可交互的 :class:`BackendElement`。
+    def ref(self, ref: str) -> BackendElement | OopifElement:
+        """把一个 Ref 解析成可交互的元素（主/同进程是 :class:`BackendElement`，跨源 OOPIF 是
+        :class:`OopifElement`）。两者都满足 ElementLike，直接喂给 ``click`` / ``type``。
 
         :param ref: :meth:`Session.snapshot` 里给出的不透明 Ref
         :raises StaleRef: 快照之后页面又导航过（纪元不符）
@@ -119,10 +126,13 @@ class Snapshot:
             raise StaleRef(
                 f"ref {ref!r} is from a stale snapshot (page navigated since); take a new snapshot"
             )
-        backend_node_id = self._refs.get(ref)
-        if backend_node_id is None:
+        descriptor = self._refs.get(ref)
+        if descriptor is None:
             raise ElementError(f"unknown ref {ref!r} in this snapshot")
-        return BackendElement(self._session, backend_node_id, ref)
+        if isinstance(descriptor, int):
+            return BackendElement(self._session, descriptor, ref)
+        _kind, sub_sid, iframe_backend, backend = descriptor
+        return OopifElement(self._session, sub_sid, iframe_backend, backend, ref)
 
 
 class BackendElement:
@@ -285,6 +295,182 @@ class BackendElement:
         return object_id
 
 
+#: 算 <iframe> 内容区在父页 viewport 里的左上角（+ 是否带 transform）。在 iframe 元素上
+#: callFunctionOn，``this`` = 该 <iframe>。给 OopifElement 做坐标换算用。
+_OFFSET_FN = (
+    "function(){ const r=this.getBoundingClientRect(); const cs=getComputedStyle(this);"
+    " let t=false; for(let n=this;n;n=n.parentElement){"
+    "   if(getComputedStyle(n).transform!=='none'){t=true;break;} }"
+    " return {x:r.left+(parseFloat(cs.borderLeftWidth)||0)+(parseFloat(cs.paddingLeft)||0),"
+    "         y:r.top+(parseFloat(cs.borderTopWidth)||0)+(parseFloat(cs.paddingTop)||0),"
+    "         transformed:t}; }"
+)
+
+
+class OopifElement:
+    """跨源 **OOPIF** 内某节点的 :class:`~sleight.core.element.ElementLike`。
+
+    OOPIF 在独立进程/独立 CDP target，backendNodeId 只在它自己 attach 出的子 session 里有效，
+    ``DOM.getBoxModel`` 返回的是 **frame-local** 坐标。所以这里：几何 = 子 session 的
+    getBoxModel + ``<iframe>`` 元素在父页的偏移 = 顶层坐标；输入照旧从顶层 session 发；命中
+    两级——父页命中 iframe（``getNodeForLocation``）+ frame 内命中目标（子 session
+    ``elementFromPoint`` 穿透 shadow）。
+
+    边界（显式失败而非静默误点）：iframe 带 CSS transform 直接抛；OOPIF 的滚动不支持（子
+    session 的 objectId 顶层用不了），元素不在 frame 视口内会命中失败报错。
+    """
+
+    __slots__ = ("_backend", "_iframe_backend", "_ref", "_session", "_sub_sid")
+
+    def __init__(
+        self, session: Session, sub_sid: str, iframe_backend: int, backend: int, ref: str = ""
+    ) -> None:
+        self._session = session
+        self._sub_sid = sub_sid              # 该 OOPIF 的子 CDP session
+        self._iframe_backend = iframe_backend  # 父页里 <iframe> 的 backendNodeId（主 session）
+        self._backend = backend              # 目标节点的 backendNodeId（子 session）
+        self._ref = ref
+
+    def __repr__(self) -> str:
+        tag = f" {self._ref}" if self._ref else ""
+        return f"<OopifElement backendNodeId={self._backend} oopif{tag}>"
+
+    # —— 在指定 session 上解析 backendNodeId、在节点上求值 —— #
+
+    def _resolve_on(self, backend: int, sid: str) -> str | None:
+        try:
+            r = self._session._t.call("DOM.resolveNode", {"backendNodeId": backend}, session_id=sid)
+        except ProtocolError:
+            return None
+        return (r.get("object") or {}).get("objectId")
+
+    def _release(self, sid: str, object_id: str) -> None:
+        with suppress(SleightError):
+            self._session._t.call("Runtime.releaseObject", {"objectId": object_id}, session_id=sid)
+
+    def _call_on(self, sid: str, object_id: str, fn: str, args: tuple[Any, ...] = ()) -> Any:
+        r = self._session._t.call("Runtime.callFunctionOn", {
+            "objectId": object_id, "functionDeclaration": fn,
+            "arguments": [{"value": a} for a in args], "returnByValue": True,
+        }, session_id=sid)
+        if details := r.get("exceptionDetails"):
+            desc = (details.get("exception") or {}).get("description") or details.get("text")
+            raise ProtocolError(f"JS exception: {desc}")
+        return (r.get("result") or {}).get("value")
+
+    def _sub(self, fn: str, args: tuple[Any, ...] = ()) -> Any:
+        """在 OOPIF 目标节点上（子 session，``this`` = 节点）求值。"""
+        object_id = self._resolve_on(self._backend, self._sub_sid)
+        if object_id is None:
+            raise ElementError(f"{self!r} is gone")
+        try:
+            return self._call_on(self._sub_sid, object_id, fn, args)
+        finally:
+            self._release(self._sub_sid, object_id)
+
+    def _offset(self) -> dict[str, Any]:
+        """<iframe> 内容区左上角在父页 viewport 的坐标；带 transform 直接抛。"""
+        main = self._session.cdp_session_id
+        object_id = self._resolve_on(self._iframe_backend, main)
+        if object_id is None:
+            raise ElementError(f"{self!r}: the containing iframe is gone")
+        try:
+            off = self._call_on(main, object_id, _OFFSET_FN)
+        finally:
+            self._release(main, object_id)
+        if off is None:
+            raise ElementError(f"{self!r}: the containing iframe is gone")
+        if off.get("transformed"):
+            raise ElementError(
+                f"{self!r}: the iframe (or an ancestor) has a CSS transform; cross-frame "
+                "coordinates would be wrong. Not clicking blindly."
+            )
+        return off
+
+    # —— ElementLike 协议 —— #
+
+    def exists(self) -> bool:
+        object_id = self._resolve_on(self._backend, self._sub_sid)
+        if object_id is None:
+            return False
+        self._release(self._sub_sid, object_id)
+        return True
+
+    def require_box(self) -> Box:
+        off = self._offset()
+        try:
+            r = self._session._t.call(
+                "DOM.getBoxModel", {"backendNodeId": self._backend}, session_id=self._sub_sid
+            )
+        except ProtocolError as exc:
+            raise ElementError(f"{self!r} is gone") from exc
+        quad = (r.get("model") or {}).get("content")
+        if not quad or len(quad) < 8:
+            raise ElementError(f"{self!r} has no box (hidden?)")
+        xs, ys = quad[0::2], quad[1::2]
+        x, y = min(xs), min(ys)
+        box = Box(off["x"] + x, off["y"] + y, float(max(xs) - x), float(max(ys) - y))
+        if box.empty:
+            raise ElementError(f"{self!r} has zero size ({box.w}x{box.h}); is it hidden?")
+        return box
+
+    def in_viewport(self) -> bool:
+        try:
+            box = self.require_box()
+        except ElementError:
+            return False
+        vw, vh = self._session.viewport()
+        return box.x < vw and box.y < vh and box.x + box.w > 0 and box.y + box.h > 0
+
+    def require_hit(self, x: int, y: int, *, when: str) -> None:
+        off = self._offset()
+        # 一级：父页这一点最上层必须是这个 iframe（OOPIF 内容不在主 session，getNodeForLocation
+        # 只能返回到 iframe 元素为止）
+        try:
+            loc = self._session.call(
+                "DOM.getNodeForLocation", {"x": int(x), "y": int(y), "includeUserAgentShadowDOM": True}
+            )
+        except ProtocolError as exc:
+            raise ElementError(f"{self!r}: nothing hit at ({x}, {y}) {when}") from exc
+        if loc.get("backendNodeId") != self._iframe_backend:
+            raise ElementError(
+                f"{self!r}: point ({x}, {y}) is not over its iframe {when} "
+                "(something in the parent page is covering it)"
+            )
+        # 二级：换算到 frame 内坐标，在 OOPIF 文档里命中目标（穿透 shadow）
+        fx, fy = round(x - off["x"]), round(y - off["y"])
+        fn = f"function(px, py) {{ const el = this; {composed_hit_body('px', 'py')} }}"
+        if not self._sub(fn, (fx, fy)):
+            raise ElementError(
+                f"{self!r} is covered inside its iframe at frame-local ({fx}, {fy}) {when}"
+            )
+
+    def require_focus(self, *, after: str) -> None:
+        fn = (
+            "function() { const el = this; const a = el.ownerDocument.activeElement;"
+            " return a === el || el.contains(a); }"
+        )
+        if not self._sub(fn):
+            raise ElementError(f"{self!r} does not have focus {after} — is it focusable?")
+
+    def scroll_metrics(self) -> dict[str, float]:
+        fn = (
+            "function() { const r = this.getBoundingClientRect();"
+            " const v = this.ownerDocument.defaultView || window;"
+            " return {top: r.top, bottom: r.bottom, height: v.innerHeight}; }"
+        )
+        m = self._sub(fn)
+        if not m:
+            raise ElementError(f"{self!r} is gone")
+        return {"top": float(m["top"]), "bottom": float(m["bottom"]), "height": float(m["height"])}
+
+    def object_id(self) -> str:
+        raise ElementError(
+            f"{self!r}: scrolling to an element inside a cross-origin iframe is not supported "
+            "yet; make sure it is already in view"
+        )
+
+
 def _ax_str(node: dict[str, Any], key: str) -> str:
     return str((node.get(key) or {}).get("value") or "")
 
@@ -313,7 +499,46 @@ def _child_frame_nodes(session: Session, iframe_backend_node_id: int) -> list[di
             return None
         return session.call("Accessibility.getFullAXTree", {"frameId": frame_id}).get("nodes") or []
     except SleightError:
-        return None                          # OOPIF / 不可达：不下钻，iframe 节点当叶子
+        return None                          # OOPIF / 不可达：走 _oopif_child_nodes
+
+
+def _oopif_child_nodes(
+    session: Session, iframe_backend_node_id: int
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """取一个**跨源 OOPIF** iframe 的子文档：attach 它的子 session，返回 ``(sub_sid, nodes)``。
+
+    OOPIF 在别的 target，主 session 的 ``getFullAXTree({frameId})`` 取不到。这里先从
+    ``<iframe>`` 元素读出它的 ``src`` 去 :meth:`Session._attach_oopif`，再在子 session 上取整棵
+    AX 树。任一步失败（拿不到 src、没有匹配的 target、有重定向对不上 url…）返回 ``None`` ——
+    这个 iframe 就当叶子，不崩。
+    """
+    try:
+        resolved = session.call("DOM.resolveNode", {"backendNodeId": iframe_backend_node_id})
+    except SleightError:
+        return None
+    object_id = (resolved.get("object") or {}).get("objectId")
+    if not object_id:
+        return None
+    try:
+        src = (session.call("Runtime.callFunctionOn", {
+            "objectId": object_id, "functionDeclaration": "function(){ return this.src || null; }",
+            "returnByValue": True,
+        }).get("result") or {}).get("value")
+    except SleightError:
+        src = None
+    finally:
+        with suppress(SleightError):
+            session.call("Runtime.releaseObject", {"objectId": object_id})
+    if not src:
+        return None
+    try:
+        sub_sid = session._attach_oopif(src)
+        oop_nodes = session._t.call(
+            "Accessibility.getFullAXTree", session_id=sub_sid
+        ).get("nodes") or []
+    except SleightError:
+        return None
+    return sub_sid, oop_nodes
 
 
 def build_snapshot(
@@ -322,15 +547,24 @@ def build_snapshot(
 ) -> Snapshot:
     """把 ``Accessibility.getFullAXTree`` 的扁平节点列表建成 :class:`Snapshot`。
 
-    :param ref_for: ``backendNodeId -> ref`` 的分配器（由 Session 维护，保证跨快照稳定）
+    合并子 frame：**同进程** iframe 的节点用主 session 的 backendNodeId（坐标已拍平）；**跨源
+    OOPIF** 的节点用它子 session 的 backendNodeId，解析成 :class:`OopifElement`（子 session +
+    父页偏移）。两种在树里没有区别，Ref 都能点。
+
+    :param ref_for: ``(frame_key, backendNodeId) -> ref`` 的分配器（Session 维护，保证跨快照
+        稳定）。``frame_key`` 让不同 frame 里恰好相同的 backendNodeId 也拿到不同 Ref
     :param max_depth: 最大深度；``None`` 不限
-    :param cross_frame: 是否把同进程子 frame 的树合并进来（默认合并）。iframe 节点下就直接是
-        它内部的可交互元素，Ref 照样能点，不用手动切 frame
+    :param cross_frame: 是否合并子 frame，默认合并
     """
-    refs: dict[str, int] = {}
+    refs: dict[str, Any] = {}                # ref -> 描述符：int（主/同进程）或 ("oopif", sid, ifb, b)
     seen_frames: set[int] = set()            # 防自引用/重复下钻的兜底
 
-    def build_tree(frame_nodes: list[dict[str, Any]], depth: int) -> SnapshotNode | None:
+    def _same_process(backend: int) -> int:
+        return backend                       # 主 session 直接可解析
+
+    def build_tree(
+        frame_nodes: list[dict[str, Any]], depth: int, frame_key: Any, descriptor: Any
+    ) -> SnapshotNode | None:
         by_id = {n["nodeId"]: n for n in frame_nodes}
         children_of = {n["nodeId"]: list(n.get("childIds") or []) for n in frame_nodes}
         root_id = next((n["nodeId"] for n in frame_nodes if not n.get("parentId")), None)
@@ -351,8 +585,8 @@ def build_snapshot(
 
             ref: str | None = None
             if role in INTERACTABLE_ROLES and backend is not None and not node.get("ignored"):
-                ref = ref_for(backend)
-                refs[ref] = backend
+                ref = ref_for(frame_key, backend)
+                refs[ref] = descriptor(backend)
 
             kids: list[SnapshotNode] = []
             if max_depth is None or node_depth < max_depth:
@@ -361,19 +595,17 @@ def build_snapshot(
                     if child is not None:
                         kids.append(child)
 
-            # 下钻同进程子 frame：把它内部的树接到这个 iframe 节点下
+            # 下钻子 frame：先试同进程，再试跨源 OOPIF，把它内部的树接到这个 iframe 节点下
             if (
                 cross_frame and role.lower() == "iframe" and backend is not None
                 and backend not in seen_frames
                 and (max_depth is None or node_depth < max_depth)
             ):
                 seen_frames.add(backend)
-                child_nodes = _child_frame_nodes(session, backend)
-                if child_nodes:
-                    sub = build_tree(child_nodes, node_depth + 1)
-                    if sub is not None:
-                        # 去掉子文档那层 RootWebArea 包裹，内容直接挂到 iframe 下
-                        kids.extend(sub.children if sub.role == "RootWebArea" else [sub])
+                sub = _descend(backend, node_depth)
+                if sub is not None:
+                    # 去掉子文档那层 RootWebArea 包裹，内容直接挂到 iframe 下
+                    kids.extend(sub.children if sub.role == "RootWebArea" else [sub])
 
             generic = role in ("", "none", "presentation", "generic")
             if generic and not (ref or name):
@@ -388,5 +620,20 @@ def build_snapshot(
 
         return convert(root_id, depth, "") if root_id is not None else None
 
-    root = build_tree(nodes, 0) or SnapshotNode(role="RootWebArea", name="")
+    def _descend(iframe_backend: int, node_depth: int) -> SnapshotNode | None:
+        same = _child_frame_nodes(session, iframe_backend)
+        if same:
+            return build_tree(same, node_depth + 1, None, _same_process)
+        oopif = _oopif_child_nodes(session, iframe_backend)
+        if oopif:
+            sub_sid, oop_nodes = oopif
+
+            def descriptor(b: int, _sid: str = sub_sid, _ifb: int = iframe_backend) -> Any:
+                return ("oopif", _sid, _ifb, b)
+
+            # OOPIF 的 backendNodeId 在子 session 里，同一 sub_sid 就是它的 frame_key
+            return build_tree(oop_nodes, node_depth + 1, sub_sid, descriptor)
+        return None
+
+    root = build_tree(nodes, 0, None, _same_process) or SnapshotNode(role="RootWebArea", name="")
     return Snapshot(session, root, refs, generation)

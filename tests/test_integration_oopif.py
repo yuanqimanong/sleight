@@ -55,6 +55,47 @@ def test_oopif_is_enumerated_and_read_via_a_sub_session(live_session):
         assert view.count("#b") == 1
 
 
+def test_snapshot_merges_a_cross_origin_oopif(live_session):
+    """合并快照把跨源 OOPIF 内的可交互元素也并进来、给 Ref，按 Ref 点击/输入真实生效。"""
+    def pages(port):
+        return {
+            "child.html": (
+                "<!doctype html><title>C</title>"
+                "<button id=b onclick='window.__hit = event.isTrusted'>OOPBtn</button>"
+                "<input id=i placeholder=oopinput>"
+            ),
+            "parent.html": (
+                "<!doctype html><title>P</title><h1>Parent</h1>"
+                f"<iframe id=cap src='http://localhost:{port}/child.html' "
+                "style='width:360px;height:220px'></iframe>"
+            ),
+        }
+    with serve_http(pages) as port:
+        _load_with_oopif(live_session, port)
+        snap = live_session.snapshot()
+
+        def ref_of(name):
+            for node in _walk(snap.root):
+                if node.ref and name in node.name:
+                    return node.ref
+            return None
+
+        assert ref_of("OOPBtn"), "跨源 OOPIF 内的按钮应并入合并快照并带 Ref"
+        live_session.click(snap.ref(ref_of("OOPBtn")))
+        assert live_session.frame("child.html").eval("window.__hit") is True
+
+        live_session.type(snap.ref(ref_of("oopinput")), "typed")
+        assert live_session.frame("child.html").eval(
+            "document.getElementById('i').value"
+        ) == "typed"
+
+
+def _walk(node):
+    yield node
+    for child in node.children:
+        yield from _walk(child)
+
+
 def test_click_into_a_cross_origin_oopif_lands_trusted(live_session):
     with serve_http(_pages) as port:
         _load_with_oopif(live_session, port)
