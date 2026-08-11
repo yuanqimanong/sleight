@@ -7,5 +7,6 @@ extract 收进四个类型化、结果结构化的工具（Session / Observe / A
 """
 
 from .gateway import Gateway, ToolResult
+from .mcp import MCPServer
 
-__all__ = ["Gateway", "ToolResult"]
+__all__ = ["Gateway", "MCPServer", "ToolResult"]

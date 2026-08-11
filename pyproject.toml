@@ -48,6 +48,8 @@ dev = [
 [project.scripts]
 # 部署与运维入口。sleight --help 列全部子命令
 sleight = "sleight.cli:main"
+# MCP server（stdio）。MCP host 里配一条命令即可，见 sleight/agent/mcp.py
+sleight-mcp = "sleight.agent.mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/yuanqimanong/sleight"
