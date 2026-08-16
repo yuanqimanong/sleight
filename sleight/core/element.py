@@ -181,6 +181,16 @@ class Element:
         """元素的 ``innerText``。元素不在了返回空串。"""
         return self._eval("return el.innerText;") or ""
 
+    def html(self) -> str | None:
+        """元素的 ``outerHTML`` —— 只这一棵子树。
+
+        和 :meth:`Session.content` <sleight.core.session.Session.content> 的区别是
+        回传量：正文容器往往只占整页的几十分之一，链路窄的时候差别很大。
+
+        :returns: 该元素的 outerHTML；元素不在了返回 ``None``
+        """
+        return self._eval("return el.outerHTML;")
+
     def attr(self, name: str) -> str | None:
         """读一个 HTML **属性**。
 

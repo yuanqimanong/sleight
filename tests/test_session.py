@@ -593,6 +593,28 @@ def test_reads_degrade_to_empty_strings_not_none():
     assert s.content() == "" and s.title() == "" and s.text() == ""
 
 
+def test_outer_html_asks_for_just_that_subtree():
+    """整个卖点就是回传量：拼出来的 JS 必须读元素的 outerHTML，不是整页的。"""
+    s, t = build(evaluate=lambda expr: "<article>正文</article>" if "el.outerHTML" in expr else None)
+    assert s.outer_html("article.main") == "<article>正文</article>"
+    expr = t.evaluates()[-1]
+    assert "article.main" in expr and "el.outerHTML" in expr
+    assert "documentElement" not in expr, "别顺手把整页也拉回来"
+
+
+def test_outer_html_indexes_into_multiple_matches():
+    s, t = build(evaluate=lambda expr: "<li>b</li>")
+    assert s.outer_html("li", 2) == "<li>b</li>"
+    assert "[2]" in t.evaluates()[-1]
+
+
+def test_outer_html_returns_none_when_nothing_matches():
+    """``None`` 而不是 ``""`` —— "没这个元素"和"元素是空的"必须分得开，
+    否则调用方只能靠猜来决定要不要重试。"""
+    s, _ = build(evaluate=lambda expr: None)
+    assert s.outer_html("#missing") is None
+
+
 def test_eval_surfaces_a_js_exception():
     t = FakeTransport()
     t.results["Runtime.evaluate"] = {

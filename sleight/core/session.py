@@ -809,8 +809,32 @@ class Session:
         return (r.get("result") or {}).get("value")
 
     def content(self) -> str:
-        """渲染后的 ``document.documentElement.outerHTML``。"""
+        """渲染后的 ``document.documentElement.outerHTML``。
+
+        整页回传。只要正文那一棵子树时用 :meth:`outer_html`。
+        """
         return self.eval("document.documentElement.outerHTML") or ""
+
+    def outer_html(self, selector: str, index: int = 0) -> str | None:
+        """只回传匹配元素的 ``outerHTML`` —— 一次 CDP 往返，不拉整页。
+
+        :meth:`content` 把整个文档搬回来；新闻页的正文容器常常只占其中几十分之一，
+        剩下的是导航、推荐位、广告和内联脚本。链路窄或 RTT 高时这个差别很大，
+        而"少拉一点"以前只能靠调用方自己拼一段 ``eval`` 来绕。
+
+            >>> s.outer_html("article.main")        # 只要正文子树
+            >>> s.parse()                           # 要整页离线查询还是用它
+
+        **只看主 frame 的普通 DOM** —— 和 :meth:`query` 同一个边界，不穿透
+        iframe / Shadow DOM。要 frame 内的用
+        :meth:`frame(...).html() <sleight.core.frames.FrameView.html>`。
+
+        :param selector: CSS 选择器
+        :param index: 同一选择器命中多个时取第几个
+        :returns: 该元素的 outerHTML；没命中返回 ``None``（**不是**空串 ——
+            "没这个元素"和"元素是空的"要分得开）
+        """
+        return Element(self, selector, index).html()
 
     def parse(self, *, pierce_shadow: bool = False, xpath: bool = False) -> StaticElement:
         """把当前页面 HTML 取一次、解析成**离线可查**的静态树，用于批量只读。

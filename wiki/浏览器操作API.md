@@ -1,6 +1,6 @@
 # 浏览器操作 API
 
-这页是 `Session` 的完整方法参考（55 个公开成员）。拿一个 Session 的方式见 [[快速开始]]。
+这页是 `Session` 的完整方法参考（56 个公开成员）。拿一个 Session 的方式见 [[快速开始]]。
 
 ## 顶层入口
 
@@ -19,7 +19,7 @@ CDP 的入站流量里，**命令响应**由你自己的动作决定，**事件*
 | 开关 | 关掉之后失去 | 关掉之后**不受影响** |
 |---|---|---|
 | `track_network=False` | `NetworkIdle` 等待条件、`cookies()`、`capture_resources()` | 其余全部 |
-| `track_runtime=False` | `frames()` / `frame()` / `frame_element()`（直接抛 `SleightError`）；`snapshot()` 不再下钻**跨源** OOPIF | `eval()` / `content()` / `query()` / `click()` / `type()` / `wait(DomReady/Load/Text/Selector)`、导航纪元，以及 `snapshot()` 对**同源** iframe 的合并 |
+| `track_runtime=False` | `frames()` / `frame()` / `frame_element()`（直接抛 `SleightError`）；`snapshot()` 不再下钻**跨源** OOPIF | `eval()` / `content()` / `outer_html()` / `query()` / `click()` / `type()` / `wait(DomReady/Load/Text/Selector)`、导航纪元，以及 `snapshot()` 对**同源** iframe 的合并 |
 
 `eval()` 为什么不受影响：`Runtime.evaluate` 是**命令**，不需要先 `Runtime.enable`——enable 打开的只是
 事件流（`consoleAPICalled` / `exceptionThrown` / `executionContextCreated`）。库里唯一传 `contextId`
@@ -29,7 +29,7 @@ CDP 的入站流量里，**命令响应**由你自己的动作决定，**事件*
 # 只抓正文、不进 iframe 的爬虫：两个都可以关
 with connect(url, track_network=False, track_runtime=False) as s:
     s.open(article_url)              # wait 靠 Page 域，照常
-    html = s.content()
+    html = s.outer_html("article")   # 只回传正文子树
 ```
 
 > 想省流量**不要**用 `block()` / `Fetch.enable`：它对每个子资源产生一条
@@ -68,6 +68,7 @@ with connect(url, track_network=False, track_runtime=False) as s:
 | 方法 | 说明 |
 |---|---|
 | `content()` | 渲染后 `documentElement.outerHTML`（**不含** shadow 内容）|
+| `outer_html(selector, index=0)` | 只回传匹配元素的 `outerHTML`；没命中返回 `None`。窄链路上别用 `content()` 拉整页 |
 | `text()` | `body.innerText`（隐藏元素不计）|
 | `title()` / `url()` | 标题 / 当前地址（重定向后）|
 | `viewport()` | `(innerWidth, innerHeight)`，求值失败回落 `(1280,720)` |
@@ -151,7 +152,7 @@ with connect(url, track_network=False, track_runtime=False) as s:
 
 ## Element（实时元素）
 
-`exists()` `box()` `require_box()` `text()` `attr(name)` `value()` `screenshot()`
+`exists()` `box()` `require_box()` `text()` `html()` `attr(name)` `value()` `screenshot()`
 `select_option()` `upload_file()` `object_id()` `in_viewport()` `scroll_metrics()`
 `hit_test(x,y)` `require_hit(...)` `has_focus()` `require_focus(...)` `js_ref`
 
