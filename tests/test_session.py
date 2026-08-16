@@ -182,6 +182,55 @@ def test_network_tracking_can_be_turned_off():
     assert "Network.enable" not in t.methods()
 
 
+def test_runtime_tracking_can_be_turned_off():
+    """``Runtime.enable`` 订阅的是事件（console / exception / executionContext），
+    在高延迟链路上是纯开销。关掉它**只**能少发这一条 enable，Page 域一个不动。"""
+    _, t = build(track_runtime=False)
+    assert "Runtime.enable" not in t.methods()
+    # Page 域不可关：wait(DomReady) 和导航纪元全靠 Page.lifecycleEvent
+    assert ("Page.enable", {}, SID) in t.calls
+    assert ("Page.setLifecycleEventsEnabled", {"enabled": True}, SID) in t.calls
+    assert ("Network.enable", {}, SID) in t.calls, "两个开关互相独立"
+
+
+def test_eval_still_works_without_the_runtime_domain():
+    """整个改动成立的前提。
+
+    ``Runtime.evaluate`` 是**命令**，不需要 ``Runtime.enable``（enable 打开的只是事件流）。
+    ``eval()`` 又不传 ``contextId`` —— 传 contextId 的只有 ``_eval_in_context()`` ——
+    所以主 frame 求值这条路完全不碰 Runtime 域的事件。
+    """
+    s, t = build(track_runtime=False, evaluate=lambda expr: 2 if expr == "1+1" else "标题")
+    assert s.eval("1+1") == 2
+    assert s.eval("document.title") == "标题"
+    params = [p for m, p, _ in t.calls if m == "Runtime.evaluate"]
+    assert params and all("contextId" not in p for p in params), \
+        "eval() 一旦开始传 contextId，就真的依赖 Runtime 域了"
+
+
+def test_content_and_query_still_work_without_the_runtime_domain():
+    """``content()`` / ``query()`` 都建在 ``eval()`` 上，一并锁住。"""
+    s, _ = build(
+        track_runtime=False,
+        evaluate=lambda expr: "<html>x</html>" if "outerHTML" in expr else True,
+    )
+    assert s.content() == "<html>x</html>"
+    assert s.query("#x") is not None
+
+
+def test_navigation_epoch_is_unaffected_without_the_runtime_domain():
+    """``wait(DomReady)`` / 导航纪元靠 Page 域，关 Runtime 不该动它们。"""
+    s, t = build(track_runtime=False)
+    navigating(t, "L1")
+    t.on_pump = lambda tr: tr.lifecycle("DOMContentLoaded", "L1")
+    s.open("https://example.com", timeout=2)
+
+    navigating(t, "L2")                       # 新纪元；只来上一轮 loaderId 的迟到事件
+    t.on_pump = lambda tr: tr.lifecycle("DOMContentLoaded", "L1")
+    with pytest.raises(TimeoutError):
+        s.open("https://b.example", timeout=0.2)
+
+
 def test_a_target_that_cannot_be_attached_is_not_left_behind():
     """建了 tab 却没接上，不能把它留在浏览器里泄漏。"""
     t = FakeTransport()
@@ -542,6 +591,28 @@ def test_reads_go_through_runtime_evaluate():
 def test_reads_degrade_to_empty_strings_not_none():
     s, _ = build(evaluate=lambda expr: None)
     assert s.content() == "" and s.title() == "" and s.text() == ""
+
+
+def test_outer_html_asks_for_just_that_subtree():
+    """整个卖点就是回传量：拼出来的 JS 必须读元素的 outerHTML，不是整页的。"""
+    s, t = build(evaluate=lambda expr: "<article>正文</article>" if "el.outerHTML" in expr else None)
+    assert s.outer_html("article.main") == "<article>正文</article>"
+    expr = t.evaluates()[-1]
+    assert "article.main" in expr and "el.outerHTML" in expr
+    assert "documentElement" not in expr, "别顺手把整页也拉回来"
+
+
+def test_outer_html_indexes_into_multiple_matches():
+    s, t = build(evaluate=lambda expr: "<li>b</li>")
+    assert s.outer_html("li", 2) == "<li>b</li>"
+    assert "[2]" in t.evaluates()[-1]
+
+
+def test_outer_html_returns_none_when_nothing_matches():
+    """``None`` 而不是 ``""`` —— "没这个元素"和"元素是空的"必须分得开，
+    否则调用方只能靠猜来决定要不要重试。"""
+    s, _ = build(evaluate=lambda expr: None)
+    assert s.outer_html("#missing") is None
 
 
 def test_eval_surfaces_a_js_exception():
@@ -1239,6 +1310,75 @@ def test_execution_context_map_clears_on_navigation():
     t.emit("Runtime.executionContextsCleared", {})
     s.drain()
     assert s._frame_contexts == {}, "整页导航后旧的执行上下文映射必须清空"
+
+
+# --------------------------------------------------------------------------- #
+# Frame 层与 track_runtime 的关系
+#
+# 整层都建在 Runtime 域上：同源靠 executionContextCreated 填出的 _frame_contexts，
+# 跨源靠在子 session 上 Runtime.enable。关掉之后必须显式报错 —— 静默返回"全都不可达"
+# 会让调用方拿着一棵看起来正常、实际什么都读不了的树。
+# --------------------------------------------------------------------------- #
+
+
+def _frames_off():
+    """和 ``_with_frames`` 同样的 frame 树，但会话关掉了 Runtime 域。"""
+    s, t = build(track_runtime=False)
+    t.results["Page.getFrameTree"] = _frame_tree()
+    return s, t
+
+
+def test_frames_needs_the_runtime_domain():
+    s, _ = _frames_off()
+    with pytest.raises(SleightError, match="track_runtime=False"):
+        s.frames()
+
+
+def test_frame_needs_the_runtime_domain():
+    s, _ = _frames_off()
+    with pytest.raises(SleightError, match="track_runtime=False"):
+        s.frame("box")
+
+
+def test_frame_element_needs_the_runtime_domain():
+    """不挡的话 _frame_contexts 恒空，同源 iframe 会被误判成跨源掉进 OOPIF 分支，
+    报一个跟真实原因毫无关系的错。"""
+    s, _ = build(track_runtime=False, evaluate=lambda expr: True)
+    with pytest.raises(SleightError, match="track_runtime=False"):
+        s.frame_element("#cap", "#btn")
+
+
+def test_attaching_an_oopif_needs_the_runtime_domain():
+    """守卫落在 _attach_oopif 本身：否则 track_runtime=False 的会话仍会为页面上每一个
+    跨源 iframe（新闻页上就是广告位）开一路 Runtime 事件流，开关名不副实。"""
+    s, t = _frames_off()
+    t.results["Target.getTargets"] = {"targetInfos": [
+        {"type": "iframe", "targetId": "T-AD", "url": "https://other.example/ad"},
+    ]}
+    with pytest.raises(SleightError, match="track_runtime=False"):
+        s._attach_oopif("https://other.example/ad")
+    assert "Runtime.enable" not in t.methods()
+
+
+def test_snapshot_degrades_oopif_to_a_leaf_without_the_runtime_domain():
+    """快照不因此崩：``build_snapshot`` 把 ``SleightError`` 当"这个 iframe 读不进来"，
+    OOPIF 变叶子。同进程 iframe 走 Accessibility/DOM，不受影响。"""
+    from sleight.core.snapshot import _oopif_child_nodes
+    s, t = _frames_off()
+    t.results["DOM.resolveNode"] = {"object": {"objectId": "OBJ-1"}}
+    t.results["Runtime.callFunctionOn"] = {"result": {"value": "https://other.example/ad"}}
+    t.results["Target.getTargets"] = {"targetInfos": [
+        {"type": "iframe", "targetId": "T-AD", "url": "https://other.example/ad"},
+    ]}
+    assert _oopif_child_nodes(s, 99) is None
+
+
+def test_frames_are_unchanged_when_runtime_tracking_is_on():
+    """默认路径的回归锁：开关默认 True 时 frames() 一个字节都不该变。"""
+    s, _ = _with_frames()
+    frames = {f.frame_id: f for f in s.frames()}
+    assert frames["F1"].is_main and frames["F1"].reachable
+    assert frames["SAME"].reachable and not frames["OOPIF"].reachable
 
 
 def test_pierce_element_uses_a_shadow_piercing_ref():

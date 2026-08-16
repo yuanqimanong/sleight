@@ -61,3 +61,19 @@ def test_link_heavy_page_is_flagged_low_quality(live_session):
         doc = live_session.extract_document()
         assert doc.link_density > 0.5
         assert doc.low_quality, "全是链接的页面应判低质量，而不是假装抽到干净正文"
+
+
+def test_outer_html_returns_only_that_subtree(live_session):
+    """``outer_html()`` 的卖点是回传量，所以断言的是"明显比整页小"，
+    不是"内容对" —— 后者 fake transport 已经锁住了。"""
+    with serve_pages({"a.html": _ARTICLE}) as d:
+        live_session.open(f"file://{d}/a.html", wait=Text("The Heading"))
+
+        body = live_session.outer_html("article")
+        assert body is not None
+        assert body.startswith("<article>") and body.endswith("</article>")
+        assert "First paragraph" in body
+        assert "<nav>" not in body and "<footer>" not in body, "只该有这一棵子树"
+        assert len(body) < len(live_session.content()) / 2
+
+        assert live_session.outer_html("#nothing-here") is None

@@ -14,6 +14,12 @@
 | **点/输入** iframe 里的元素 | `s.frame_element(iframe选择器, 内部选择器)` |
 | 让 LLM 一次看到所有 frame | `s.snapshot()`（默认合并，见 [[Snapshot与Ref]]）|
 
+> 前三个都要 Runtime 域：同源那条靠 `Runtime.executionContextCreated` 事件维护
+> `frameId → contextId` 映射，跨源那条要在子 session 上 `Runtime.enable`。所以会话建成
+> `track_runtime=False`（见 [[浏览器操作API]] 的「事件量开关」）时它们直接抛 `SleightError`，
+> 而不是返回一棵"全都不可达"的树。`snapshot()` 例外：它对**同源** iframe 走
+> `Accessibility` + `DOM`，关了 Runtime 照样合并，只是不再下钻跨源 OOPIF。
+
 ## 枚举
 
 ```python

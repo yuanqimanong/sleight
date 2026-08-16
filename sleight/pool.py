@@ -263,7 +263,7 @@ class InstanceHandle:
         落在默认 browser context 里，Cookie 和登录态照样继承。
 
         :param kw: 透传给 :class:`~sleight.core.session.Session` ——
-            ``human`` / ``rng`` / ``track_network``
+            ``human`` / ``rng`` / ``track_network`` / ``track_runtime``
         :returns: 新会话。handle 关闭时会连带关掉它
         """
         s = Session.create(self.transport, **kw)

@@ -157,6 +157,17 @@ class Session:
         False 表示接管的，只 detach
     :param track_network: 是否 ``Network.enable``。关掉就用不了
         :class:`~sleight.core.types.NetworkIdle` 和 :meth:`cookies`
+    :param track_runtime: 是否 ``Runtime.enable``。关掉之后**失去**的只有 frame 层：
+        :meth:`frames` / :meth:`frame` / :meth:`frame_element` 会抛
+        :class:`~sleight.core.errors.SleightError`，:meth:`snapshot` 不再下钻跨源 OOPIF
+        （同进程 iframe 照常合并，那条路走 ``Accessibility``/``DOM``，不碰 Runtime）。
+        **:meth:`eval` / :meth:`query` / :meth:`click` / :meth:`wait` 全不受影响** ——
+        ``Runtime.evaluate`` / ``callFunctionOn`` 这些**命令**本来就不需要 enable，
+        enable 打开的只是**事件**流。
+        想关它的理由：``Runtime.enable`` 会订阅 ``consoleAPICalled`` /
+        ``exceptionThrown`` / ``executionContextCreated``，广告和埋点脚本多的页面上这是
+        持续的事件洪流，而库内唯一的消费方是 frame 上下文映射。CDP 走高延迟隧道
+        （跨境 VPN、几百毫秒 RTT）时，这些事件是纯开销，还会挤占同一条链路上的别的流量
     :param human: 本会话的默认拟人档位。``False`` 全部直通，``True`` 用 DEFAULT
         预设，也可以直接给一个 :class:`~sleight.core.human.presets.HumanProfile`
     :param rng: 随机源。传固定 seed 的 :class:`random.Random` 可复现整段交互
@@ -170,6 +181,7 @@ class Session:
         *,
         owned_target: bool,
         track_network: bool = True,
+        track_runtime: bool = True,
         human: bool | HumanProfile = False,
         rng: Random | None = None,
     ) -> None:
@@ -194,12 +206,16 @@ class Session:
         self._ref_counter = 0
         self._netidle = NetworkIdleTracker()
         self._track_network = track_network
+        self._track_runtime = track_runtime
         # 事件观察者。有了它就不必去 monkeypatch _handle —— 那是私有方法，而且补丁
         # 之间会互相覆盖
         self._observers: list[Callable[[Event], None]] = []
 
+        # Page 域**不可关**：_handle 消费 Page.lifecycleEvent，wait(DomReady/Load) 和
+        # _renavigate 的导航纪元全靠它。能省的只有 Runtime 和 Network 这两股事件流。
         self._t.call("Page.enable", session_id=self._sid)
-        self._t.call("Runtime.enable", session_id=self._sid)
+        if track_runtime:
+            self._t.call("Runtime.enable", session_id=self._sid)
         self._t.call("Page.setLifecycleEventsEnabled", {"enabled": True}, session_id=self._sid)
         if track_network:
             self._t.call("Network.enable", session_id=self._sid)
@@ -224,7 +240,8 @@ class Session:
         :param browser_context_id: 把 tab 建在这个 browser context 里。一般不直接传 ——
             用 :meth:`InstanceHandle.context() <sleight.pool.InstanceHandle.context>`，
             它会连带管好 context 的销毁
-        :param kw: 透传给构造函数（``human`` / ``rng`` / ``track_network``）
+        :param kw: 透传给构造函数（``human`` / ``rng`` / ``track_network`` /
+            ``track_runtime``）
         :returns: ``owned_target=True`` 的 Session，退出时会关掉这个 tab
         """
         params: dict[str, Any] = {"url": "about:blank"}
@@ -754,9 +771,15 @@ class Session:
     def _eval_in_context(self, context_id: int, expr: str) -> Any:
         """在指定 ``executionContextId`` 里求值 —— 给子 frame 的 :class:`FrameView` 用。
 
+        注意 :meth:`eval` **不**走这里、也不传 ``contextId``，所以它在
+        ``track_runtime=False`` 下照常可用；只有这条按上下文定址的路径需要 Runtime 域
+        送来的 id。
+
         :param context_id: :attr:`_frame_contexts` 里记下的某个 frame 的默认世界 id
         :raises ProtocolError: JS 抛异常，或该上下文已随导航失效
+        :raises SleightError: 本会话构造时 ``track_runtime=False``
         """
+        self._require_runtime("evaluating inside a child frame")
         return self._evaluate({
             "expression": expr, "returnByValue": True, "awaitPromise": True,
             "contextId": context_id,
@@ -786,8 +809,32 @@ class Session:
         return (r.get("result") or {}).get("value")
 
     def content(self) -> str:
-        """渲染后的 ``document.documentElement.outerHTML``。"""
+        """渲染后的 ``document.documentElement.outerHTML``。
+
+        整页回传。只要正文那一棵子树时用 :meth:`outer_html`。
+        """
         return self.eval("document.documentElement.outerHTML") or ""
+
+    def outer_html(self, selector: str, index: int = 0) -> str | None:
+        """只回传匹配元素的 ``outerHTML`` —— 一次 CDP 往返，不拉整页。
+
+        :meth:`content` 把整个文档搬回来；新闻页的正文容器常常只占其中几十分之一，
+        剩下的是导航、推荐位、广告和内联脚本。链路窄或 RTT 高时这个差别很大，
+        而"少拉一点"以前只能靠调用方自己拼一段 ``eval`` 来绕。
+
+            >>> s.outer_html("article.main")        # 只要正文子树
+            >>> s.parse()                           # 要整页离线查询还是用它
+
+        **只看主 frame 的普通 DOM** —— 和 :meth:`query` 同一个边界，不穿透
+        iframe / Shadow DOM。要 frame 内的用
+        :meth:`frame(...).html() <sleight.core.frames.FrameView.html>`。
+
+        :param selector: CSS 选择器
+        :param index: 同一选择器命中多个时取第几个
+        :returns: 该元素的 outerHTML；没命中返回 ``None``（**不是**空串 ——
+            "没这个元素"和"元素是空的"要分得开）
+        """
+        return Element(self, selector, index).html()
 
     def parse(self, *, pierce_shadow: bool = False, xpath: bool = False) -> StaticElement:
         """把当前页面 HTML 取一次、解析成**离线可查**的静态树，用于批量只读。
@@ -915,7 +962,24 @@ class Session:
     #   - 跨源 OOPIF：另一个进程、另一个 target，attach 出它自己的子 CDP session 再操作。
     # OOPIF 在主 target 的 Page.getFrameTree 里可能只留一个空 url 占位（甚至不出现），所以
     # 枚举时还要并入 Target.getTargets 里 type=="iframe" 的目标，才靠得住。
+    #
+    # 整层都依赖 Runtime 域：同源那条靠 executionContextCreated 事件填出来的
+    # _frame_contexts，跨源那条靠在子 session 上 Runtime.enable 建默认世界。所以
+    # track_runtime=False 时这些入口一律显式拒绝 —— 静默返回"全都不可达"会让调用方
+    # 拿着一棵看起来正常、实际什么都读不了的树，比报错难查得多。
     # ------------------------------------------------------------------ #
+
+    def _require_runtime(self, what: str) -> None:
+        """本会话关掉了 Runtime 域就拒绝，别静默给出半成品。
+
+        :param what: 填进错误消息的动作描述，如 ``"frames()"``
+        :raises SleightError: 构造时 ``track_runtime=False``
+        """
+        if not self._track_runtime:
+            raise SleightError(
+                f"{what} needs the Runtime domain; this session was created "
+                "with track_runtime=False"
+            )
 
     def frames(self) -> list[FrameInfo]:
         """列出本 target 的 frame（含主 frame、同源子 frame 和跨源 OOPIF）。
@@ -925,7 +989,9 @@ class Session:
         （出现在列表里、可被 :meth:`frame` 通过子 session 读入，但不在主 session 上下文里）。
 
         :returns: frame 列表，主 frame 在最前
+        :raises SleightError: 本会话构造时 ``track_runtime=False``，``reachable`` 无从判断
         """
+        self._require_runtime("frames()")
         self.drain()                    # 把已到的 executionContextCreated 收进映射
         tree = self.call("Page.getFrameTree").get("frameTree") or {}
         out: list[FrameInfo] = []
@@ -983,8 +1049,16 @@ class Session:
 
         懒建、缓存；:meth:`close` 时统一 detach。
 
-        :raises SleightError: 没有匹配的 iframe target，或有多个同 url 无法区分
+        守卫放在这里而不是只放在几个公开入口上：这一步会在子 session 上
+        ``Runtime.enable``，不挡住的话 ``track_runtime=False`` 的会话仍然会为页面上
+        每一个跨源 iframe（新闻页上通常就是广告位）开一路 Runtime 事件流，开关就名不副实了。
+        :func:`~sleight.core.snapshot.build_snapshot` 那条调用把 ``SleightError`` 当作
+        "这个 iframe 读不进来"处理，于是 :meth:`snapshot` 自然降级成把 OOPIF 当叶子。
+
+        :raises SleightError: 本会话构造时 ``track_runtime=False``；或没有匹配的
+            iframe target，或有多个同 url 无法区分
         """
+        self._require_runtime("reading a cross-origin iframe")
         if url in self._oopif_sessions:
             return self._oopif_sessions[url]
         matches = [
@@ -1015,7 +1089,8 @@ class Session:
         同源子 frame 直接读；跨源 OOPIF 会自动 attach 出子 session 再读。
 
         :param match: 精确 frameId、精确 ``name``，或出现在该 frame URL 里的子串
-        :raises SleightError: 没有匹配的 frame，或 OOPIF 无法 attach
+        :raises SleightError: 没有匹配的 frame，OOPIF 无法 attach，或本会话构造时
+            ``track_runtime=False``
         """
         candidates = [f for f in self.frames() if not f.is_main]
         for f in candidates:
@@ -1036,9 +1111,13 @@ class Session:
         :param iframe_selector: 主 frame 里定位 ``<iframe>`` 的 CSS 选择器
         :param selector: iframe **内**定位目标元素的 CSS 选择器
         :param index: 同一选择器命中多个时取第几个
-        :raises SleightError: 选择器指的不是 iframe，或跨源 target 无法 attach
+        :raises SleightError: 选择器指的不是 iframe，跨源 target 无法 attach，或本会话
+            构造时 ``track_runtime=False``
         :raises ElementError: iframe 或目标元素不存在
         """
+        # 先挡：没有 Runtime 域，_frame_contexts 恒空，同源 iframe 会被误判成跨源并掉进
+        # OOPIF 分支，报一个跟真实原因毫无关系的错。
+        self._require_runtime("frame_element()")
         iframe = self.require(iframe_selector)
         object_id = iframe.object_id()
         try:
@@ -1080,6 +1159,10 @@ class Session:
         默认 ``cross_frame=True``：**同进程子 frame**（同源 iframe）的内容会直接合并进来，
         iframe 节点下就是它内部的可交互元素，Ref 照样能点，不用手动切 frame。跨源 OOPIF
         在别的进程，本快照不合并（用 :meth:`frame_element` 进它）。
+
+        会话构造时 ``track_runtime=False`` 的话，跨源 OOPIF 不再下钻（那条路要在子 session
+        上开 Runtime 域），这些 iframe 就是叶子节点；同进程子 frame 走 ``Accessibility`` /
+        ``DOM``，不受影响，照常合并。
 
         Ref 绑定当前导航纪元：同一节点跨多次 snapshot 拿到同一个 Ref；页面导航后旧 Ref
         失效（:meth:`Snapshot.ref` 抛 :class:`~sleight.core.errors.StaleRef`），不静默误点。
