@@ -203,7 +203,8 @@ def launch(
     :param no_sandbox: Linux root/容器里通常要 True
     :param profile_dir: 持久 Profile 目录；``None`` 用临时目录并在退出时删除
     :param args: 追加的启动参数
-    :param kw: 透传给 :meth:`Session.create`（``human`` / ``rng`` / ``track_network``）
+    :param kw: 透传给 :meth:`Session.create`（``human`` / ``rng`` / ``track_network`` /
+        ``track_runtime``）
     """
     from .providers.local import LocalLauncher
 

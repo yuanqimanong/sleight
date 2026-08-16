@@ -9,7 +9,32 @@
 | `connect(url, *, headers=None, **kw)` | 连已在跑的 CDP 端点（`http://host:port` 或 `ws://…`），新建自有 tab |
 | `launch(binary, *, fingerprint=None, headless=True, no_sandbox=False, profile_dir=None, args=(), **kw)` | 起本机浏览器再连上；退出时停进程、清临时 profile |
 
-`**kw` 透传给 `Session`：`human`（拟人档位）、`rng`（固定 seed 可复现）、`track_network`。
+`**kw` 透传给 `Session`：`human`（拟人档位）、`rng`（固定 seed 可复现）、`track_network`、`track_runtime`。
+
+## 事件量开关（窄链路/高 RTT 时用）
+
+CDP 的入站流量里，**命令响应**由你自己的动作决定，**事件**由浏览器主动推。两个开关关的都是后者，
+默认都是 `True`，现有代码不用改。
+
+| 开关 | 关掉之后失去 | 关掉之后**不受影响** |
+|---|---|---|
+| `track_network=False` | `NetworkIdle` 等待条件、`cookies()`、`capture_resources()` | 其余全部 |
+| `track_runtime=False` | `frames()` / `frame()` / `frame_element()`（直接抛 `SleightError`）；`snapshot()` 不再下钻**跨源** OOPIF | `eval()` / `content()` / `query()` / `click()` / `type()` / `wait(DomReady/Load/Text/Selector)`、导航纪元，以及 `snapshot()` 对**同源** iframe 的合并 |
+
+`eval()` 为什么不受影响：`Runtime.evaluate` 是**命令**，不需要先 `Runtime.enable`——enable 打开的只是
+事件流（`consoleAPICalled` / `exceptionThrown` / `executionContextCreated`）。库里唯一传 `contextId`
+的是子 frame 求值那条路，`eval()` 不传。
+
+```python
+# 只抓正文、不进 iframe 的爬虫：两个都可以关
+with connect(url, track_network=False, track_runtime=False) as s:
+    s.open(article_url)              # wait 靠 Page 域，照常
+    html = s.content()
+```
+
+> 想省流量**不要**用 `block()` / `Fetch.enable`：它对每个子资源产生一条
+> `Fetch.requestPaused`（含完整请求头）加一条回应，两帧过链路；而被拦掉的资源本来就下载在
+> 浏览器宿主上，根本不占你到浏览器这条链路。方向是反的。
 
 ## 导航
 
@@ -68,7 +93,8 @@
 | `frame(match)` | 按 frameId / name / URL 子串定位，返回只读 `FrameView` |
 | `frame_element(iframe选择器, 内部选择器, index=0)` | iframe 内的可交互元素（同源与 OOPIF 都支持）|
 
-详见 [[Frame与ShadowDOM]]。
+整层依赖 Runtime 域，会话建成 `track_runtime=False` 时这三个都抛 `SleightError`。详见
+[[Frame与ShadowDOM]]。
 
 ## LLM 层
 
