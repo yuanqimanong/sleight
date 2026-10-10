@@ -14,6 +14,7 @@ __all__ = [
     "NotFound",
     "NotReady",
     "ProtocolError",
+    "ResponseTooLarge",
     "SessionLost",
     "SleightError",
     "StaleRef",
@@ -40,6 +41,10 @@ class ProtocolError(SleightError):
         super().__init__(message)
         self.code = code
         self.method = method
+
+
+class ResponseTooLarge(SleightError):
+    """Response reading was cancelled at the configured byte limit."""
 
 
 class InstanceError(SleightError):

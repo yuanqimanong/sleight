@@ -4,18 +4,39 @@
 typing rhythm modelled on keystroke-dynamics research, and exclusive leasing for
 browser instance pools.
 
-Python ≥ 3.11 · one runtime dependency (`websocket-client`) · MIT
+Python ≥ 3.11 · XPath and Web UI included · MIT
 
 **[中文 README](README-zh.md)** · 📖 **[Wiki — full documentation](https://github.com/yuanqimanong/sleight/wiki)**
 
 ```bash
-pip install sleight                     # core: one dependency
-pip install "sleight[xpath]"            # + lxml, for parse(xpath=True)
-pip install "sleight[ui]"               # + fastapi/uvicorn, for `sleight ui`
-pip install "sleight[redis]"            # + redis, cross-process leasing
+pip install sleight                     # includes XPath and `sleight ui`
 
 sleight browser install fingerprint-chromium   # optional: an anti-detect kernel
 ```
+
+## 统一浏览器服务
+
+```bash
+sleight ui --bind 127.0.0.1 --port 8700
+```
+
+首次启动显示一次管理员 token。Web 创建执行用户，配置默认环境及插件/代理模板，再签发执行 token。
+启动时自动读取当前工作目录的 `.env`，系统环境变量优先。参考 [.env.example](.env.example)，填写 `SLEIGHT_UI_TOKEN` 可使用固定管理员登录 token。
+默认 SQLite；设置 `SLEIGHT_DATABASE_URL=postgresql://...` 可使用 PostgreSQL，配置与运行账本使用相同模型。
+部署只运行 Python，Vue 页面已打包，不需要 Node 或 Redis。
+
+```python
+from sleight.client import ServiceClient
+
+with ServiceClient("http://sleight-host:8700", token="<执行用户 token>") as client:
+    profile = client.create_profile(name="任务", fingerprint_seed=12345)
+    with client.session(profile["id"], human=True) as session:
+        session.open("https://example.com")
+        print(session.title())
+```
+
+HTTP MCP 位于 `/mcp`。stdio 使用 `SLEIGHT_UPSTREAM`、`SLEIGHT_TOKEN` 启动 `sleight-mcp`。
+[部署、数据库迁移与回滚](docs/0.6部署与验收.md)。旧本机 CDP API 仍可使用。
 
 ## 30 seconds
 
@@ -135,7 +156,7 @@ snapshots, and every ref dies the moment the page navigates (`StaleRef`) rather 
 silently pointing at whatever now sits in that slot. Same-process iframes are merged in,
 so an element inside an iframe gets a ref like any other.
 
-Pull the article and the usual fields out of the rendered DOM — no lxml, no Node:
+Pull the article and the usual fields out of the rendered DOM, directly in the browser:
 
 ```python
 doc = s.extract_document()
@@ -150,6 +171,25 @@ dom = s.parse()                                   # one fetch, then pure Python
 names = [e.text for e in dom.query_all("tr.row td.name")]
 deep  = s.parse(pierce_shadow=True)               # open shadow DOM inlined too
 ```
+
+After logging in, read an API through the current browser, reusing its cookies
+(including HttpOnly cookies), proxy and connections:
+
+```python
+s.open("https://your-site.example/account", referrer="https://your-site.example/")
+response = s.fetch("/api/items")
+if response.ok:
+    items = response.json()
+```
+
+`fetch()` does not navigate or create an instance. Remote `ServiceClient` sessions
+use the same API. The SDK supports GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS, with a
+30-second default timeout and a 1 MiB response limit. Timeout or oversize aborts
+the read. Responses are UTF-8 text; HTTP errors keep their real status, transport
+errors raise, and requests are never replayed automatically. Browser CORS/CSP,
+SameSite and header rules still apply. This cannot replace every rendered page.
+`open(referrer=...)` sets an explicit navigation source; cross-origin navigation
+sends only the origin, and HTTPS-to-HTTP navigation sends no referrer.
 
 Launch a local browser yourself — any Chromium build, including an anti-detect one.
 Same seed, same fingerprint, every run:
@@ -167,10 +207,10 @@ And the whole thing is an **MCP server**, so a model can drive it directly:
 SLEIGHT_CDP_URL=http://127.0.0.1:9222 sleight-mcp
 ```
 
-It speaks JSON-RPC over stdio with no extra dependencies and exposes four tools —
+It speaks JSON-RPC over stdio with no extra dependencies and exposes five tools —
 `browser_session` / `browser_observe` (snapshot + find) / `browser_act` (by ref *or* by
-coordinate, for canvas and icon-only UIs) / `browser_extract`. Raw CDP and `eval` stay
-hidden unless you opt in.
+coordinate, for canvas and icon-only UIs) / `browser_extract` / `browser_fetch`
+(GET/HEAD, up to 256 KiB). Raw CDP and `eval` stay hidden unless you opt in.
 
 ## Getting a fleet to drive
 
@@ -190,7 +230,7 @@ sleight ui                                                # the same, in a brows
 ```
 
 Hosts, the managers on each of them, and a deploy/backup/upgrade audit trail live in a
-local SQLite database (`~/.sleight/sleight.db`) that the CLI and the web UI share.
+local SQLite database (`data/control.db` under the working directory) that the CLI and the web UI share. Override the data directory with `SLEIGHT_HOME`.
 
 `sleight ui` walks you through it: connect a host (with a real connection test before
 anything is saved), pick a sizing template, preflight, deploy. Every option carries a
@@ -200,8 +240,8 @@ defined once on the backend, rendered by both the CLI (`sleight templates`) and 
 Deploys are idempotent, `--dry-run` prints the exact bytes it would write, and the
 things you must not do are refused rather than documented: no `latest` tag, no
 `down -v`, no silently rotating an in-use `AUTH_TOKEN`, no second manager on the same
-`/data`. The engine is stdlib-only (SSH is the system `ssh` binary); only
-`sleight ui` needs `pip install "sleight[ui]"`.
+`/data`. The engine is stdlib-only (SSH is the system `ssh` binary);
+`sleight ui` and its dependencies are included in the default installation.
 
 ## Why this exists
 
@@ -260,7 +300,7 @@ CSS queries · human mouse / keyboard / wheel / **drag** · element screenshots 
 (`select_option`, `upload_file`) · isolated **browser contexts** for exit-IP rotation ·
 origin-scoped **site-data clearing** · **request blocking** via the Fetch domain ·
 `exit_ip()` · structured network-resource capture · instance discovery across providers ·
-cooperative exclusive leasing with TTL renewal (in-memory, or Redis-backed across
+cooperative exclusive leasing with TTL renewal (in-memory, or database-backed across
 processes) · idempotent recovery · deploying and operating CloakBrowser Manager over
 local docker or SSH, extensions included.
 
@@ -313,3 +353,8 @@ Publishing — no token is stored in this repository.
 ## License
 
 MIT
+
+
+## 0.6 deployment
+
+[三项目部署、兼容边界与完整回滚](docs/0.6部署与验收.md)。Web 管理原生浏览器和 Docker Manager，统一插件/代理模板，复用官方 VNC。服务统一管理 SQLite/PostgreSQL 配额、租约与回收，客户端通过用户 token 接入，Sleight 服务必须常驻。

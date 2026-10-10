@@ -8,8 +8,9 @@ import pytest
 
 from sleight import Pool
 from sleight import pool as pool_module
-from sleight.core.errors import ConnectionError, NotFound, TimeoutError
+from sleight.core.errors import Busy, ConnectionError, NotFound, TimeoutError
 from sleight.core.types import InstanceInfo
+from sleight.lease.memory import MemoryLease
 
 from .conftest import FakeProvider
 
@@ -202,6 +203,38 @@ def test_ensure_ready_is_called_on_acquire():
     p = FakeProvider(1)
     with p.lease() as h:
         assert p.ready_calls == [h.info.id]
+
+
+def test_slow_browser_startup_keeps_lease_exclusive():
+    store = MemoryLease()
+    provider = FakeProvider(1)
+    key = "sleight:fake:i0"
+
+    def slow_start(instance_id):
+        time.sleep(3.2)  # 超过原租约的 TTL，模拟 Cloak 冷启动。
+        contender = store.acquire(key, ttl=3)
+        if contender:
+            store.release(key, contender)
+        assert contender is None, "启动浏览器时租约过期，其他任务能抢走实例"
+
+    provider.ensure_ready = slow_start
+    with Pool([provider], lease=store, ttl=3).lease(block=False) as handle:
+        assert not handle.lease.lost
+    assert not store.held_keys()
+
+
+def test_failed_startup_releases_lease_and_stops_renewal():
+    store = MemoryLease()
+    provider = FakeProvider(1)
+
+    def failed_start(instance_id):
+        raise ConnectionError("startup failed")
+
+    provider.ensure_ready = failed_start
+    with pytest.raises(Busy):
+        Pool([provider], lease=store, ttl=3).lease(block=False)
+    assert not store.held_keys()
+    assert provider.release_calls == ["i0"]
 
 
 def test_instances_are_spread_across_providers():

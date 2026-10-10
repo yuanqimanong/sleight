@@ -10,6 +10,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
+import yaml
+
 from .spec import CONTAINER_DATA, CONTAINER_PORT, DeploySpec
 
 __all__ = ["ENV_KEYS", "format_env", "parse_env", "render_compose", "render_env"]
@@ -19,7 +23,7 @@ ENV_KEYS = ("AUTH_TOKEN", "MANAGER_IMAGE", "MANAGER_BIND_IP", "MANAGER_PORT")
 
 HEADER = (
     "# 由 sleight deploy 生成 —— 手改会在下次 apply 时被覆盖。\n"
-    "# 要改配置就改 sleight 的部署参数（或 ~/.sleight/hosts.toml），然后重新 apply。\n"
+    "# 要改配置就改 sleight 的部署参数或 Web 配置，然后重新 apply。\n"
 )
 
 
@@ -37,11 +41,11 @@ def render_compose(spec: DeploySpec) -> str:
     :returns: 完整的 compose 文件文本
     """
     healthcheck_url = f"http://127.0.0.1:{CONTAINER_PORT}/api/status"
-    return f"""{HEADER}
+    rendered = f"""{HEADER}
 name: {spec.name}
 
 services:
-  manager:
+  {spec.service_name}:
     image: "${{MANAGER_IMAGE:?MANAGER_IMAGE is missing from .env}}"
     container_name: {spec.container_name}
     restart: {spec.restart}
@@ -52,11 +56,15 @@ services:
 
     environment:
       AUTH_TOKEN: "${{AUTH_TOKEN:?AUTH_TOKEN is missing from .env}}"
+      CLOAKBROWSER_AUTO_UPDATE: "{str(spec.auto_update).lower()}"
 
     volumes:
-      - ./data:{CONTAINER_DATA}
+      - "{spec.data_dir}:{CONTAINER_DATA}"
 
     shm_size: "{spec.shm_size}"
+    mem_limit: "{spec.mem_limit}"
+    cpus: {spec.cpus}
+    pids_limit: {spec.pids_limit}
     stop_grace_period: {spec.stop_grace_period}
 
     ulimits:
@@ -65,14 +73,14 @@ services:
         hard: {spec.nofile}
 
     # 在容器**内部**执行，所以是 127.0.0.1:{CONTAINER_PORT} 而不是宿主机端口。
-    # /api/status 免鉴权，健康检查不需要 token。
+    # 新旧 Manager 都支持带 token 的 /api/status；旧版 /api/health 也要求鉴权。
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('{healthcheck_url}', timeout=5)"
+          "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('{healthcheck_url}', headers={{'Authorization':'Bearer '+os.environ['AUTH_TOKEN']}}), timeout=5)"
         ]
       interval: 30s
       timeout: 8s
@@ -85,6 +93,42 @@ services:
         max-size: "{spec.log_max_size}"
         max-file: "{spec.log_max_file}"
 """
+    if spec.data_volume:
+        body = yaml.safe_load(rendered)
+        body["services"][spec.service_name]["volumes"] = [{
+            "type": "volume", "source": "sleight_data", "target": CONTAINER_DATA,
+            "volume": {"subpath": "data"},
+        }]
+        body["volumes"] = {"sleight_data": {"name": spec.data_volume, "external": True}}
+        return HEADER + yaml.safe_dump(body, sort_keys=False, allow_unicode=True)
+    return rendered
+
+
+def merge_compose(current: str | None, spec: DeploySpec) -> str:
+    """Update owned fields while retaining networks, extra mounts, env and services."""
+    fresh = yaml.safe_load(render_compose(spec))
+    if not current:
+        return render_compose(spec)
+    old = yaml.safe_load(current)
+    if not isinstance(old, dict) or not isinstance(old.get("services"), dict):
+        raise ValueError("Existing Compose has no services; import it before applying")
+    if spec.service_name not in old["services"]:
+        raise ValueError("Configured Manager service is missing; import existing Compose first")
+    service = old["services"][spec.service_name]
+    before = deepcopy(old)
+    desired = fresh["services"][spec.service_name]
+    # Imported mounts define the real /data and plugin paths. Never replace them.
+    desired.pop("volumes")
+    environment = service.get("environment", {})
+    if isinstance(environment, list):
+        environment = dict(e.split("=", 1) if "=" in e else (e, None) for e in environment)
+    desired["environment"] = {**environment, **desired["environment"]}
+    # Preserve explicitly set runtime variables, including vendor configuration.
+    for key in ("CLOAKBROWSER_AUTO_UPDATE",):
+        desired["environment"][key] = str(spec.auto_update).lower()
+    service.update(desired)
+    # A YAML dump is stable on subsequent reconciliation and never changes env secrets.
+    return current if old == before else yaml.safe_dump(old, sort_keys=False, allow_unicode=True)
 
 
 def render_env(spec: DeploySpec, token: str, *, extra: dict[str, str] | None = None) -> str:

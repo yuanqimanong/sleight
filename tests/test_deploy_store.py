@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -33,7 +34,7 @@ def store(tmp_path) -> Store:
 
 
 def test_the_db_lands_under_sleight_home(tmp_path):
-    assert store_path() == tmp_path / "home" / "sleight.db"
+    assert store_path() == tmp_path / "home" / "control.db"
     Store()
     assert store_path().is_file()
 
@@ -49,6 +50,23 @@ def test_opening_an_existing_db_is_not_destructive(tmp_path):
     first = Store(tmp_path / "x.db")
     first.put_host(Host(name="a", ssh="u@h"))
     assert [h.name for h in Store(tmp_path / "x.db").hosts()] == ["a"]
+
+
+def test_independent_stores_can_initialize_and_audit_concurrently(tmp_path):
+    path = tmp_path / "concurrent.db"
+    barrier = threading.Barrier(12)
+
+    def write(index):
+        barrier.wait(timeout=10)
+        db = Store(path)
+        db.put_host(Host(name=f"host-{index}"))
+        db.log_event("console", "api", ok=True, detail=f"request {index}")
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(write, range(12)))
+    db = Store(path)
+    assert len(db.hosts()) == 12
+    assert len(db.events()) == 12
 
 
 # --------------------------------------------------------------------------- #

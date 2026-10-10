@@ -4,8 +4,7 @@
 和以前完全一样 —— 驱动层不该为了部署功能变重。
 
 引擎只用标准库：SSH 走系统 ``ssh`` 二进制、HTTP 走 :mod:`sleight.core._http`、
-配置走 ``tomllib``。只有 :mod:`sleight.deploy.api` 里的 Web 界面需要
-``pip install "sleight[ui]"``。
+配置走 ``tomllib``。:mod:`sleight.deploy.api` 里的 Web 界面及其依赖已包含在默认安装中。
 
     >>> from sleight.deploy import DeploySpec, Deployer, LocalRunner
     >>> spec = DeploySpec(dir="/srv/cloakbrowser-manager")

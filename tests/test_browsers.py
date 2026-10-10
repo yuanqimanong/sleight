@@ -152,3 +152,35 @@ def test_zip_member_escaping_the_target_is_refused(tmp_path):
         zf.writestr("../escaped.txt", "nope")
     with pytest.raises(SleightError, match="escaping"):
         browsers._unpack(archive, tmp_path / "out", "linux")
+
+
+def test_zip_framework_symlink_and_executable_mode(tmp_path, monkeypatch):
+    import stat
+    import zipfile
+
+    archive = tmp_path / "browser.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        binary = zipfile.ZipInfo("App/Versions/A/browser")
+        binary.external_attr = (stat.S_IFREG | 0o755) << 16
+        zf.writestr(binary, "binary")
+        link = zipfile.ZipInfo("App/Versions/Current")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link, "A")
+    links = []
+    monkeypatch.setattr(browsers.os, "symlink", lambda source, target: links.append((source, target)))
+    browsers._unpack(archive, tmp_path / "out", "macos")
+    assert links == [("A", tmp_path / "out/App/Versions/Current")]
+    assert (tmp_path / "out/App/Versions/A/browser").read_text() == "binary"
+
+
+def test_zip_symlink_cannot_escape_archive_root(tmp_path):
+    import stat
+    import zipfile
+
+    archive = tmp_path / "browser.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        link = zipfile.ZipInfo("App/Current")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link, "../../elsewhere")
+    with pytest.raises(SleightError, match="escaping"):
+        browsers._unpack(archive, tmp_path / "out", "macos")

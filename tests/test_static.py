@@ -88,14 +88,8 @@ def test_bad_selector_raises():
 
 
 # --------------------------------------------------------------------------- #
-# XPath（可选 lxml 后端）
+# XPath（默认安装包含 lxml 后端）
 # --------------------------------------------------------------------------- #
-
-lxml_only = pytest.mark.skipif(
-    __import__("importlib.util", fromlist=["util"]).find_spec("lxml") is None,
-    reason='needs pip install "sleight[xpath]"',
-)
-
 
 def test_xpath_without_the_lxml_backend_says_how_to_enable_it():
     from sleight.core.errors import SleightError
@@ -105,7 +99,6 @@ def test_xpath_without_the_lxml_backend_says_how_to_enable_it():
         dom.xpath("//li")
 
 
-@lxml_only
 def test_xpath_returns_elements_and_string_values():
     dom = parse_html(_HTML, xpath=True)
 
@@ -121,7 +114,6 @@ def test_xpath_returns_elements_and_string_values():
     assert hrefs == ["/a", "/b", "/c", "/x"]
 
 
-@lxml_only
 def test_xpath_supports_what_the_css_subset_cannot():
     dom = parse_html(_HTML, xpath=True)
     # contains() + 位置谓词 + 轴 —— CSS 子集都表达不了
@@ -131,7 +123,6 @@ def test_xpath_supports_what_the_css_subset_cannot():
     assert dom.xpath("//input/preceding-sibling::ul")[0].tag == "ul"
 
 
-@lxml_only
 def test_xpath_is_relative_to_the_element_it_is_called_on():
     dom = parse_html(_HTML, xpath=True)
     main = dom.query("#main")
@@ -139,7 +130,6 @@ def test_xpath_is_relative_to_the_element_it_is_called_on():
     assert len(dom.xpath("//a")) == 4, "文档级：footer 的 a 也算"
 
 
-@lxml_only
 def test_css_semantics_are_identical_on_both_backends():
     plain, lx = parse_html(_HTML), parse_html(_HTML, xpath=True)
     for selector in ("li.row", "#main a", "ul.list > li", "[href^=/]", "a, input", "li.row.hot"):
@@ -149,7 +139,6 @@ def test_css_semantics_are_identical_on_both_backends():
     assert plain.query("p").text == lx.query("p").text == "some bold text"
 
 
-@lxml_only
 def test_lxml_backed_tree_still_walks_parents_and_children():
     dom = parse_html(_HTML, xpath=True)
     row = dom.xpath("//li[@data-k='2']")[0]

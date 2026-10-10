@@ -1685,7 +1685,7 @@ def _walk(node):
 
 
 # --------------------------------------------------------------------------- #
-# 四工具 Gateway
+# Gateway 工具
 # --------------------------------------------------------------------------- #
 
 
@@ -1749,7 +1749,7 @@ def test_gateway_extract_returns_structured_fields():
 def test_gateway_describe_lists_the_tool_surface():
     g, _, _ = _gateway()
     d = g.describe()
-    assert set(d) == {"session", "observe", "act", "extract"}
+    assert set(d) == {"session", "observe", "act", "extract", "fetch"}
     assert "find" in d["observe"] and "click" in d["act"]
 
 

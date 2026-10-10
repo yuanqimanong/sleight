@@ -12,8 +12,6 @@ from typing import ClassVar
 
 import pytest
 
-fastapi = pytest.importorskip("fastapi", reason="需要 pip install \"sleight[ui]\"")
-
 # fastapi 装了 httpx 却没装 = dev 环境坏了，**不能跳过**。跳过的话这个文件里 36 条
 # 测试会一声不响地消失，而构建照样是绿的 —— 换 httpx2 的时候就这么中过一次。
 try:
@@ -22,19 +20,19 @@ except ImportError as exc:                                  # pragma: no cover
     raise RuntimeError(
         "fastapi is installed but httpx is not, so fastapi.testclient cannot be used and "
         "the whole web-API suite would silently vanish. Install the dev extra "
-        "(uv sync --extra dev). Note fastapi's TestClient still needs httpx, not httpx2."
+        "(uv sync --group dev). Note fastapi's TestClient still needs httpx, not httpx2."
     ) from exc
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from sleight.deploy import spec as spec_mod  # noqa: E402
-from sleight.deploy.api import app as app_mod  # noqa: E402
-from sleight.deploy.api.app import Jobs, create_app  # noqa: E402
-from sleight.deploy.engine import DeployResult, Plan  # noqa: E402
-from sleight.deploy.errors import DeployError  # noqa: E402
-from sleight.deploy.preflight import Check, CheckLevel  # noqa: E402
+from sleight.deploy import spec as spec_mod
+from sleight.deploy.api import app as app_mod
+from sleight.deploy.api.app import Jobs, create_app
+from sleight.deploy.engine import DeployResult, Plan
+from sleight.deploy.errors import DeployError
+from sleight.deploy.preflight import Check, CheckLevel
 
-from .conftest import FakeRunner  # noqa: E402
+from .conftest import FakeRunner
 
 SPEC = spec_mod.DeploySpec(dir="/srv/cbm")
 
@@ -129,9 +127,10 @@ def test_defaults_exposes_the_spec_defaults(client):
 def test_index_is_self_contained():
     """CSP 之外的原因：装了 wheel 的机器可能根本没有外网。"""
     html = app_mod.INDEX.read_text(encoding="utf-8")
-    assert "<title>sleight deploy</title>" in html
+    assert "浏览器控制台</title>" in html
     assert "http://cdn" not in html and "https://cdn" not in html
-    assert "<script src=" not in html
+    assert 'src="./assets/' in html
+    assert all(path.is_file() for path in app_mod.INDEX.parent.glob("assets/*"))
 
 
 # --------------------------------------------------------------------------- #
@@ -152,13 +151,19 @@ def test_token_is_required_when_configured():
 
 def test_query_token_works_because_eventsource_cannot_set_headers():
     client = TestClient(create_app(token="s3cret"))
-    assert client.get("/api/hosts?token=s3cret").status_code == 200
+    assert client.get("/api/hosts?token=s3cret").status_code == 401
+    assert client.post("/api/auth/login", json={"token":"s3cret"}).status_code == 200
+    assert client.get("/api/hosts").status_code == 200
 
 
-def test_serve_refuses_a_public_bind_without_a_token():
-    """这个界面能在目标机上跑 ssh 和 docker，开着没口令等于开着远程执行。"""
-    with pytest.raises(DeployError, match="refusing to listen"):
-        app_mod.serve(host="0.0.0.0", port=0)
+def test_serve_initializes_a_protected_public_bind(monkeypatch, capsys):
+    import uvicorn
+    started = []
+    monkeypatch.delenv("SLEIGHT_UI_TOKEN", raising=False)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: started.append(app))
+    assert app_mod.serve(host="0.0.0.0", port=0) == 0
+    assert TestClient(started[0]).get("/api/hosts").status_code == 401
+    assert "首次管理员 token" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
@@ -329,7 +334,8 @@ def test_token_is_retrievable_through_the_ui(client, monkeypatch):
     """Manager 没有用户名密码，token 就是唯一凭据 —— 界面上得能拿到。"""
     monkeypatch.setattr(StubDeployer, "existing_token", lambda self: "t" * 64, raising=False)
     body = client.get("/api/hosts/local/token").json()
-    assert body["token"] == "t" * 64
+    assert body["token_hint"] == "tttt…"
+    assert "token" not in body
     assert body["env_path"].endswith("/.env")
 
 
@@ -500,14 +506,12 @@ def test_the_lazy_check_actually_catches_the_bug_it_is_for():
     assert hits, "这条规则连它要抓的原始 bug 都抓不到"
 
 
-def test_every_view_is_reachable_from_the_tab_list():
-    """标签页和视图函数必须一一对应，否则点过去就是 undefined is not a function。"""
-    import re
-
-    source = _index()
-    tabs = set(re.findall(r'\["(\w+)", "[^"]+"\]', source.split("const TABS")[1].split(";")[0]))
-    views = set(re.findall(r"(\w+): (\w+View)", source.split("const views = {")[1].split("};")[0]))
-    assert tabs == {k for k, _ in views}, f"标签 {tabs} 与视图 {views} 对不上"
+def test_every_vue_view_ships_in_built_assets():
+    source = "".join(p.read_text(encoding="utf-8") for p in app_mod.INDEX.parent.glob("assets/*.js"))
+    for label in ("浏览器实例", "部署环境", "插件与代理", "阈值告警", "数据库", "查看实例"):
+        assert label in source
+    assert "任务与日志" not in source
+    assert "浏览器就绪，工作继续" not in source
 
 
 def test_the_ui_never_hardcodes_field_help():
@@ -524,10 +528,10 @@ def test_the_ui_never_hardcodes_field_help():
 
 
 def test_the_ui_ships_a_theme_toggle():
-    source = _index()
-    assert 'data-theme="dark"' in source
-    assert "prefers-color-scheme: dark" in source
-    assert "sleight_theme" in source
+    scripts = "".join(p.read_text(encoding="utf-8") for p in app_mod.INDEX.parent.glob("assets/*.js"))
+    css = "".join(p.read_text(encoding="utf-8") for p in app_mod.INDEX.parent.glob("assets/*.css"))
+    assert "sleight_theme" in scripts
+    assert "data-theme=dark" in css or 'data-theme="dark"' in css
 
 
 def test_the_probe_reports_memory_the_same_way_preflight_does(client, monkeypatch):

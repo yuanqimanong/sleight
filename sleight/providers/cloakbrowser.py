@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import threading
+import time
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
@@ -16,9 +18,10 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from ..core.errors import InstanceError, NotFound, NotReady
+from ..core.errors import Busy, InstanceError, NotFound, NotReady
 from ..core.types import InstanceInfo, InstanceStatus
 from .base import HTTPProvider
+from .compat import adapt_payload
 
 log = logging.getLogger("sleight.cloakbrowser")
 
@@ -216,13 +219,19 @@ class ProfileSpec:
     screen_height: int = 1080
     gpu_vendor: Clearable = None
     gpu_renderer: Clearable = None
+    gpu_family: Literal["auto", "nvidia", "intel"] | None = None
     hardware_concurrency: int | None = None
     # 行为
     headless: bool = False
-    color_scheme: Literal["light", "dark"] | None = None
+    color_scheme: Literal["light", "dark", "no-preference"] | None = None
     clipboard_sync: bool = True
     auto_launch: bool = False                   # 默认不自动起，交给 ensure_ready
     launch_args: tuple[str, ...] = ()
+    extension_paths: tuple[str, ...] = ()
+    allow_3p_cookies: bool | None = None
+    set_google_default: bool | None = None
+    capture_preview: bool | None = None
+    restore_session: bool | None = None
     humanize: bool = False                      # 浏览器侧拟人开关，外部 CDP 拿不到
     human_preset: str = "default"
     # 元信息
@@ -427,8 +436,9 @@ class ProfileSpec:
             elif f.name == "tags":
                 if value:
                     payload["tags"] = [{"tag": t} for t in value]
-            elif f.name == "launch_args":
-                payload["launch_args"] = list(value)
+            elif f.name in ("launch_args", "extension_paths"):
+                if value or f.name == "launch_args":
+                    payload[f.name] = list(value)
             else:
                 payload[f.name] = value
         return payload
@@ -470,8 +480,19 @@ class CloakBrowserManager(HTTPProvider):
         *,
         token: str | None = None,
         name: str = "cloakbrowser",
+        api_generation: Literal["auto", "legacy", "modern"] = "auto",
+        host_os: str = "linux",
+        governor: Any = None,
+        lease: Any = None,
+        namespace: str = "default",
         **kw: Any,
     ) -> None:
+        if api_generation not in {"auto", "legacy", "modern"}:
+            raise ValueError("api_generation must be auto, legacy or modern")
+        self.api_generation = api_generation
+        self.host_os = host_os
+        self.governor = governor
+        self._capability_lock = threading.RLock()
         self.token = token or os.environ.get(TOKEN_ENV, "")
         if not self.token:
             raise ValueError(
@@ -479,6 +500,76 @@ class CloakBrowserManager(HTTPProvider):
                 "every endpoint including the WS handshake is authenticated"
             )
         super().__init__(base_url, name=name, **kw)
+        if lease is not None:
+            from ..pool import Pool
+
+            self._pool = Pool([self], lease=lease, namespace=namespace)
+
+    def capabilities(self) -> dict[str, Any]:
+        with self._capability_lock:
+            return self._capabilities()
+
+    def _capabilities(self) -> dict[str, Any]:
+        if self.api_generation == "auto":
+            response = self._http.get("/openapi.json")
+            if response.status == 404:
+                self.api_generation = "legacy"
+            elif response.ok and isinstance(response.body, dict):
+                fields = response.body.get("components", {}).get("schemas", {}).get(
+                    "ProfileCreate", {}).get("properties", {})
+                if not fields:
+                    raise InstanceError("Manager has no ProfileCreate schema; set api_generation explicitly")
+                self.api_generation = "modern" if "gpu_family" in fields else "legacy"
+                if self.api_generation == "modern":
+                    status = self._http.get("/api/status")
+                    if status.ok and isinstance(status.body, dict):
+                        self.host_os = status.body.get("host_os", self.host_os)
+            else:
+                raise InstanceError(f"Cannot inspect Manager API ({response.status})")
+        return {"generation": self.api_generation, "host_os": self.host_os,
+                "persona": "macos" if self.host_os == "macos" else "windows"}
+
+    def _payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.capabilities()
+        return adapt_payload(payload, modern=self.api_generation == "modern", host_os=self.host_os)
+
+    def _launch(self, instance_id: str) -> Any:
+        if self.governor:
+            self.governor.reserve(self, instance_id)
+        try:
+            return super()._launch(instance_id)
+        except Busy:
+            raise
+        except BaseException:
+            if self.governor:
+                self.governor.request_cleanup(instance_id, failed_start=True)
+            raise
+
+    def _stop(self, instance_id: str, *, tolerate_stopped: bool = False) -> Any:
+        result = super()._stop(instance_id, tolerate_stopped=tolerate_stopped)
+        if self.governor:
+            self.governor.release(instance_id)
+        return result
+
+    def ensure_ready(self, instance_id: str) -> None:
+        try:
+            super().ensure_ready(instance_id)
+            if self.governor:
+                self.governor.started(instance_id)
+        except BaseException:
+            if self.governor:
+                self.governor.request_cleanup(instance_id, failed_start=True)
+            raise
+
+    def recover(self, instance_id: str) -> None:
+        try:
+            super().recover(instance_id)
+            if self.governor:
+                self.governor.started(instance_id)
+        except BaseException:
+            if self.governor:
+                self.governor.request_cleanup(instance_id, failed_start=True)
+            raise
 
     # ------------------------------------------------------------------ #
 
@@ -627,12 +718,37 @@ class CloakBrowserManager(HTTPProvider):
         :raises InstanceError: Manager 拒绝了创建请求
         """
         spec.validate()
-        r = self._http.post(API, json_body=spec.to_payload())
+        if self.governor and spec.auto_launch:
+            raise ValueError("auto_launch bypasses admission; use create_profile(..., launch=True)")
+        if self.governor and "ephemeral" in spec.tags:
+            spec = spec.replace(tags=(*spec.tags, *self.governor.creation_tags()))
+        r = self._http.post(API, json_body=self._payload(spec.to_payload()))
         if not r.ok or not isinstance(r.body, dict):
             raise InstanceError(f"{self.name}: create profile failed ({r.status}) {r.detail}")
         info = self._to_info(r.body)
+        if self.governor:
+            try:
+                self.governor.created(info.id, ephemeral="ephemeral" in spec.tags)
+            except BaseException:
+                # Owner tag lets the independent collector find failed/lost registrations.
+                if "ephemeral" in spec.tags:
+                    try:
+                        self.delete_profile(info.id, force=True)
+                    except Exception:
+                        log.warning("Could not compensate registration for %s", info.id)
+                raise
         if launch:
-            self.ensure_ready(info.id)
+            try:
+                self.ensure_ready(info.id)
+            except BaseException:
+                if self.governor:
+                    self.governor.request_cleanup(info.id)
+                elif "ephemeral" in spec.tags:
+                    try:
+                        self.delete_profile(info.id, force=True)
+                    except Exception:
+                        log.warning("Startup cleanup failed for %s", info.id)
+                raise
             info = replace_ready(info)
         return info
 
@@ -651,7 +767,7 @@ class CloakBrowserManager(HTTPProvider):
         if existing is None:
             return self.create_profile(spec)
 
-        payload = spec.to_payload()
+        payload = self._payload(spec.to_payload())
         if spec.fingerprint_seed == "random":
             # "random" 的意思是**建的时候**摇一个，不是每次 ensure 都换一张身份证。
             # 不摘掉的话 to_payload() 每次给一个新值，diff 必然非空，于是每跑一遍脚本
@@ -717,6 +833,7 @@ class CloakBrowserManager(HTTPProvider):
                 "every field was UNSET or None"
             )
 
+        body = self._payload(body)
         r = self._http.put(f"{API}/{instance_id}", json_body=body)
         if r.status == 404:
             raise NotFound(f"{self.name}: no such profile {instance_id!r}")
@@ -803,12 +920,14 @@ class CloakBrowserManager(HTTPProvider):
         里的登录态，不可逆。
 
         :param instance_id: profile id
-        :param force: True 则先 stop 再删
+        :param force: True 则先 stop 再删，关闭过渡状态最多等待 10 秒
         :raises NotFound: 没这个 profile
         :raises InstanceError: 实例在运行且没给 ``force=True``
         """
         st = self.status(instance_id)
         if st is InstanceStatus.NOT_FOUND:
+            if self.governor:
+                self.governor.deleted(instance_id)
             raise NotFound(f"{self.name}: no such profile {instance_id!r}")
         if st is InstanceStatus.RUNNING:
             if not force:
@@ -817,10 +936,23 @@ class CloakBrowserManager(HTTPProvider):
                     "deleting drops its persistent user_data_dir (logins included). "
                     "Pass force=True if that is what you want."
                 )
+            if self.governor:
+                self.governor.request_cleanup(instance_id)
             self._stop(instance_id, tolerate_stopped=True)
         r = self._http.delete(f"{API}/{instance_id}")
+        if force and r.status == 409:
+            # Manager 0.1.6 的 stopped 状态可能早于关闭清理完成；只重试明确的冲突。
+            deadline = time.monotonic() + min(10, self.ready_timeout)
+            while r.status == 409 and (left := deadline - time.monotonic()) > 0:
+                time.sleep(min(.2, self.ready_poll, left))
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                r = self._http.delete(f"{API}/{instance_id}", timeout=left)
         if not r.ok and r.status != 404:
             raise InstanceError(f"{self.name}: delete profile failed ({r.status}) {r.detail}")
+        if self.governor:
+            self.governor.deleted(instance_id)
 
     def stop(self, instance_id: str) -> None:
         """显式停止一个实例。

@@ -200,7 +200,7 @@ def test_low_disk_warns():
 
 
 def test_image_check_says_tag_vs_digest_and_cached_or_not():
-    assert "tag 'v0.0.10'" in _run()["image"][1]
+    assert "tag 'v0.1.6'" in _run()["image"][1]
     assert "will be pulled" in _run()["image"][1]
     assert "already pulled" in _run(replies={"docker image inspect": (0, "sha256:x")})["image"][1]
     digest = DeploySpec(dir="/srv/cbm", image="repo/img:v1@sha256:" + "a" * 64)

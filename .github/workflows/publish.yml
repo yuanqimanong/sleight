@@ -38,13 +38,32 @@ jobs:
             exit 1
           fi
 
+      # 发布包包含本次 tag 的页面，部署机器不需要 Node。
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装前端构建依赖
+        run: npm ci
+        working-directory: frontend
+
+      - name: 前端交互测试
+        run: npm test
+        working-directory: frontend
+
+      - name: 编译前端
+        run: npm run build
+        working-directory: frontend
+
       # setup-uv 从 v8 起不再发布裸 major 标签（只有 vX.Y.Z），
       # 写 @v9 会 Unable to resolve action —— 必须钉完整版本号
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
-      - run: uv sync --extra dev
+      - run: uv sync --group dev
 
       - name: ruff
         run: uv run ruff check .
@@ -54,6 +73,31 @@ jobs:
 
       - name: 构建
         run: uv build
+
+      - name: 校验安装包内的前端资源
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          static = Path("sleight/deploy/api/static")
+          files = [p for p in static.rglob("*") if p.is_file()]
+          assert (static / "index.html").is_file(), "Missing compiled index.html"
+          assert any(p.suffix == ".js" for p in files), "Missing compiled JavaScript"
+          assert any(p.suffix == ".css" for p in files), "Missing compiled CSS"
+          wheels = list(Path("dist").glob("*.whl"))
+          sources = list(Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == len(sources) == 1, "Expected one wheel and one sdist"
+          with zipfile.ZipFile(wheels[0]) as wheel, tarfile.open(sources[0]) as sdist:
+              for path in files:
+                  name = path.as_posix()
+                  assert wheel.read(name) == path.read_bytes(), f"Wheel mismatch: {name}"
+                  member = f"{sources[0].name.removesuffix('.tar.gz')}/{name}"
+                  with sdist.extractfile(member) as stream:
+                      assert stream.read() == path.read_bytes(), f"Sdist mismatch: {name}"
+          print(f"Verified {len(files)} compiled frontend files in wheel and sdist")
+          PY
 
       # twine check 验的是 README 在 PyPI 上能不能正常渲染
       - name: twine check

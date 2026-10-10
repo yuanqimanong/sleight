@@ -32,6 +32,13 @@ from .human.presets import HumanProfile
 from .input import HumanSwitch, InputDriver
 from .netidle import NetworkIdleTracker
 from .protocol import Event
+from .request import (
+    MAX_RESPONSE_BYTES,
+    FetchResponse,
+    request_expression,
+    response_from_result,
+    validate_referrer,
+)
 from .resources import (
     RESOURCE_TYPES,
     BlockStats,
@@ -404,7 +411,8 @@ class Session:
     # 导航与等待
     # ------------------------------------------------------------------ #
 
-    def open(self, url: str, *, wait: Condition = _DEFAULT_WAIT, timeout: float = 60) -> None:
+    def open(self, url: str, *, wait: Condition = _DEFAULT_WAIT, timeout: float = 60,
+             referrer: str | None = None) -> None:
         """导航并等待条件满足。
 
         :param url: 目标地址
@@ -412,17 +420,39 @@ class Session:
             同文档导航（hash 路由）不产生任何 lifecycle 事件，此时
             ``DomReady`` / ``Load`` 直接返回，其余条件照常轮询
         :param timeout: 秒，覆盖导航命令和等待两段
+        :param referrer: 可选 HTTP(S) 来源地址，仍受浏览器 Referrer Policy 约束
         :raises TimeoutError: 条件没在 ``timeout`` 内满足
         :raises SleightError: 浏览器直接拒绝了这次导航（DNS 失败、协议错误等）
         """
         # 不走 self.call：必须先拿到新的 loaderId 再排空事件，否则新导航的 lifecycle
         # 事件会因为 loaderId 还是旧的而被当成迟到事件丢掉
+        params = {"url": url}
+        if referrer is not None:
+            params["referrer"] = validate_referrer(referrer)
+            params["referrerPolicy"] = "strictOriginWhenCrossOrigin"
         self._renavigate(
             lambda: self._t.call(
-                "Page.navigate", {"url": url}, session_id=self._sid, timeout=timeout
+                "Page.navigate", params, session_id=self._sid, timeout=timeout
             ),
             what=url, same_document=None, wait=wait, timeout=timeout,
         )
+
+    def fetch(self, url: str, *, method: str = "GET", headers: dict[str, str] | None = None,
+              body: str | None = None, timeout: float = 30,
+              max_bytes: int = MAX_RESPONSE_BYTES) -> FetchResponse:
+        """在当前页面发请求，复用 Cookie、代理和浏览器连接；不导航、不创建实例。
+
+        受 CORS/CSP 和 SameSite Cookie 规则约束。返回 UTF-8 文本，响应上限 1 MiB；
+        超时或超限会取消读取。HTTP 4xx/5xx 保留状态，网络错误抛异常，不自动重试。
+        ``headers`` 不允许覆盖 Cookie、User-Agent 或浏览器生成的协议头。
+        """
+        expression = request_expression(url, method=method, headers=headers, body=body,
+                                        timeout=timeout, max_bytes=max_bytes)
+        result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True,
+                                               "awaitPromise": True}, timeout=timeout + 2)
+        if result.get("exceptionDetails"):
+            raise ProtocolError("Browser fetch evaluation failed")
+        return response_from_result((result.get("result") or {}).get("value"))
 
     def reload(
         self,
@@ -687,6 +717,7 @@ class Session:
         predicate: Callable[[NetworkResource], bool] | None = None,
         dedupe_by: DedupeKey | None = "url",
         on_discovered: Callable[[NetworkResource], None] | None = None,
+        max_resources: int | None = None,
     ) -> Iterator[ResourceTracker]:
         """收集页面加载过程中的网络资源。
 
@@ -733,6 +764,7 @@ class Session:
             predicate=predicate,
             dedupe_by=dedupe_by,
             on_discovered=on_discovered,
+            max_resources=max_resources,
         )
         with self.observe_events(tracker.feed):
             yield tracker
@@ -846,8 +878,8 @@ class Session:
 
         :param pierce_shadow: 把 open Shadow DOM 内容也内联进来一起查。多一次页面内 DOM
             序列化，默认关
-        :param xpath: 用 lxml 建树，让 :meth:`StaticElement.xpath` 可用（需要
-            ``pip install "sleight[xpath]"``）。CSS/text/attr 行为不变，默认关
+        :param xpath: 用 lxml 建树，让 :meth:`StaticElement.xpath` 可用（依赖已包含在
+            默认安装中）。CSS/text/attr 行为不变，默认关
         :returns: 静态树根（``#document``）
         """
         html = (self.eval(_DEEP_HTML_JS) or "") if pierce_shadow else self.content()

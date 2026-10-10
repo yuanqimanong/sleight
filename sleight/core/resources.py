@@ -144,6 +144,7 @@ class ResourceTracker:
     predicate: Callable[[NetworkResource], bool] | None = None
     dedupe_by: DedupeKey | None = "url"
     on_discovered: Callable[[NetworkResource], None] | None = None
+    max_resources: int | None = None
 
     _by_request: dict[str, NetworkResource] = field(default_factory=dict, init=False)
     _order: list[str] = field(default_factory=list, init=False)
@@ -189,6 +190,9 @@ class ResourceTracker:
             )
 
     def _on_request(self, request_id: str, p: dict) -> None:
+        if request_id not in self._by_request and self.max_resources and len(self._by_request) >= self.max_resources:
+            from .errors import Busy
+            raise Busy("Resource capture limit reached; narrow the capture window")
         request = p.get("request") or {}
         url = str(request.get("url", ""))
 

@@ -21,6 +21,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  service-database:
+    name: SQLite / PostgreSQL 服务协议
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: sleight_test
+          POSTGRES_PASSWORD: sleight_test
+          POSTGRES_DB: sleight_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sleight_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: '3.11'
+      - run: uv sync --locked --group dev
+      - run: uv run pytest tests/test_service.py tests/test_service_recovery.py tests/test_service_transports.py -q
+        env:
+          SLEIGHT_TEST_DATABASE_URL: postgresql://sleight_test:sleight_test@127.0.0.1:5432/sleight_test
+  frontend:
+    name: 前端类型、交互和构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: git diff --exit-code -- sleight/deploy/api/static
   test:
     name: py${{ matrix.python }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -45,7 +85,7 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
 
-      - run: uv sync --extra dev
+      - run: uv sync --group dev
 
       - name: pytest
         run: uv run pytest -q
@@ -62,7 +102,7 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync --extra dev
+      - run: uv sync --group dev
 
       # runner 镜像自带 Google Chrome；找不到就**让 job 红**，而不是让集成测试
       # 静默 skip 出一个绿勾 —— "跑了 0 条真浏览器测试的绿 CI"正是我们要消灭的东西
@@ -95,7 +135,7 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync --extra dev
+      - run: uv sync --group dev
       - run: uv run ruff check .
       # 不跑 ruff format --check：这个项目的注释是手工按列对齐的，
       # formatter 会把它们全压掉。lint 规则在 pyproject 里，够了
@@ -138,11 +178,12 @@ jobs:
           assert mouse_path(Point(0, 0), Box(400, 300, 120, 40), rng=Random(1), profile=DEFAULT)
           assert ProfileSpec.windows('x', Region.HK).timezone == 'Asia/Hong_Kong'
           assert parse_html('<p id=a>hi</p>').query('#a').text == 'hi'
+          assert parse_html('<p>hi</p>', xpath=True).xpath('//p/text()') == ['hi']
           print('smoke ok', sleight.__version__)
           "
 
       # 部署层：console script 装上了没有、界面的 index.html 有没有被打进 wheel、
-      # 以及在**没装 fastapi**的环境里 sleight ui 会不会给一句人话
+      # 以及默认安装的 Web 依赖和应用能否正常加载
       - name: 部署 CLI 冒烟
         run: |
           cd /tmp
@@ -150,15 +191,19 @@ jobs:
           /tmp/probe/bin/sleight hosts ls
           /tmp/probe/bin/python -c "
           from pathlib import Path
+          import fastapi
+          import uvicorn
           import sleight.deploy.api.app as api
           from sleight.deploy import DeploySpec, Deployer, LocalRunner
           from sleight.deploy.render import render_compose
           assert 'AUTH_TOKEN:?' in render_compose(DeploySpec())
           assert Path(api.INDEX).is_file(), 'index.html missing from the wheel'
+          assert isinstance(api.create_app(), fastapi.FastAPI)
+          assert callable(uvicorn.run)
           print('deploy smoke ok')
           "
-          # 探针环境没装 [ui]，所以这里不会真的起服务；要的是那句人话而不是 traceback
-          /tmp/probe/bin/sleight ui 2>&1 | grep -q 'sleight\[ui\]'
+          /tmp/probe/bin/sleight ui --help
           # MCP server 的 console script 装上了没有。没给浏览器时它该给一句人话就退出，
           # 不是 traceback —— MCP host 里配错了环境变量就是这个场景
           /tmp/probe/bin/sleight-mcp 2>&1 </dev/null | grep -q 'SLEIGHT_CDP_URL'
+          /tmp/probe/bin/python "$GITHUB_WORKSPACE/tests/fixtures/package_probe.py"

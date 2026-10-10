@@ -61,11 +61,11 @@ def test_notifications_get_no_response():
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_tools_list_exposes_the_four_gateway_tools():
+def test_tools_list_exposes_the_gateway_tools():
     server, _ = _server()
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
     assert {t["name"] for t in tools} == {
-        "browser_session", "browser_observe", "browser_act", "browser_extract"
+        "browser_session", "browser_observe", "browser_act", "browser_extract", "browser_fetch"
     }
     for t in tools:
         assert t["description"] and t["inputSchema"]["type"] == "object"

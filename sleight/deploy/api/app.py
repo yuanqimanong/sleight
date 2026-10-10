@@ -3,8 +3,8 @@
 **这个界面能在目标机上执行 ssh 和 docker 命令**，等于一个远程执行入口。所以：
 
 * 默认只监听 ``127.0.0.1``；
-* 绑到别的地址时**必须**给 ``--token``，否则 :func:`serve` 直接拒绝启动；
-* 它不存任何 Manager token —— 要用时现从目标机的 ``.env`` 读。
+* ``serve`` 始终启用鉴权，首次启动签发管理员 token；
+* Manager token 留在目标机的 ``.env``，用户凭据与其他密钥由统一数据库管理。
 
 拉镜像动辄几分钟，所以部署、下发、验证这些长动作都返回一个 job id，进度用 SSE
 （``/api/jobs/{id}/events``）推。界面因此是流式的，不是一个转圈等超时的 POST。
@@ -12,19 +12,16 @@
 
 from __future__ import annotations
 
-import ipaddress
+import asyncio
 import json
 import logging
-import secrets
-import threading
 import time
-import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from ...core.errors import SleightError
+from ...core.errors import Busy, SleightError
 from ..engine import Deployer
 from ..errors import DeployError
 from ..ops import ExtensionOps, ProfileOps, extension_paths
@@ -38,6 +35,8 @@ from ..presets import (
 )
 from ..spec import DEFAULT_IMAGE, DeploySpec
 from ..store import Deployment, Host, Store
+from .auth import UIAuth
+from .jobs import Jobs
 
 
 def _format_mem(result: Any) -> str:
@@ -59,8 +58,9 @@ JOB_TTL = 3600.0
 # 里局部 import 的话，``request: Request`` 会被当成一个未知类型的查询参数，
 # 每个请求都 422。
 try:
-    from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+    from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
     from fastapi.responses import HTMLResponse, StreamingResponse
+    from fastapi.staticfiles import StaticFiles
 
     HAS_FASTAPI = True
 except ModuleNotFoundError:                                # pragma: no cover - 取决于环境
@@ -72,8 +72,7 @@ except ModuleNotFoundError:                                # pragma: no cover - 
 def _require_fastapi() -> None:
     if not HAS_FASTAPI:                                    # pragma: no cover - 取决于环境
         raise DeployError(
-            'the web UI needs FastAPI: pip install "sleight[ui]"  '
-            "(the CLI and the Python API work without it)"
+            "FastAPI is missing from this installation; repair it with: pip install sleight"
         )
 
 
@@ -82,102 +81,24 @@ def _require_fastapi() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class Job:
-    """一个后台动作。"""
-
-    id: str
-    kind: str
-    host: str
-    status: str = "running"                # running | ok | error
-    lines: list[str] = field(default_factory=list)
-    error: str = ""
-    result: Any = None
-    started: float = field(default_factory=time.monotonic)
-    finished: float = 0.0
-
-    def public(self) -> dict[str, Any]:
-        return {
-            "id": self.id, "kind": self.kind, "host": self.host, "status": self.status,
-            "lines": list(self.lines), "error": self.error, "result": self.result,
-        }
-
-
-class Jobs:
-    """进程内的 job 表。
-
-    刻意不做持久化 —— 界面进程重启后一个"还在跑"的假状态比没有更糟。
-    """
-
-    def __init__(self) -> None:
-        self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
-
-    def start(self, kind: str, host: str, work: Callable[[Callable[[str], None]], Any]) -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, host=host)
-        with self._lock:
-            self._reap()
-            self._jobs[job.id] = job
-
-        def say(message: str) -> None:
-            with self._lock:
-                job.lines.append(message)
-
-        def run() -> None:
-            try:
-                result = work(say)
-            except BaseException as exc:                    # 线程里的异常必须落到 job 上
-                log.exception("job %s (%s) failed", job.id, kind)
-                with self._lock:
-                    job.status = "error"
-                    job.error = f"{type(exc).__name__}: {exc}"
-            else:
-                with self._lock:
-                    job.status = "ok"
-                    job.result = result
-            finally:
-                job.finished = time.monotonic()
-
-        threading.Thread(target=run, name=f"sleight-job-{job.id}", daemon=True).start()
-        return job
-
-    def get(self, job_id: str) -> Job | None:
-        with self._lock:
-            return self._jobs.get(job_id)
-
-    def all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return [j.public() for j in sorted(self._jobs.values(), key=lambda j: -j.started)]
-
-    def _reap(self) -> None:
-        cutoff = time.monotonic() - JOB_TTL
-        for key in [k for k, j in self._jobs.items() if j.finished and j.finished < cutoff]:
-            del self._jobs[key]
-
 
 # --------------------------------------------------------------------------- #
 # 应用
 # --------------------------------------------------------------------------- #
 
 
-def create_app(*, token: str | None = None) -> Any:
+def create_app(*, token: str | None = None, runtime: bool = True, require_auth: bool = False) -> Any:
     """建 FastAPI 应用。
 
-    :param token: 访问口令。给了就每个请求都要带 ``X-Sleight-Token`` 头或 ``?token=``
-        （``EventSource`` 设不了自定义头，所以查询参数也收）
+    :param token: 服务使用 ``X-Sleight-Token``；浏览器登录后使用 HttpOnly cookie。
+        URL 查询参数不接受口令。
     :returns: ``fastapi.FastAPI`` 实例
     :raises DeployError: 没装 fastapi
     """
     _require_fastapi()
     jobs = Jobs()
-
-    def guard(request: Request, tok: str | None = Query(None, alias="token")) -> None:
-        if not token:
-            return
-        given = request.headers.get("X-Sleight-Token") or tok or ""
-        # 定时比较：这个口令是唯一的门
-        if not secrets.compare_digest(given, token):
-            raise HTTPException(status_code=401, detail="bad or missing UI token")
+    auth = UIAuth(token, required=require_auth)
+    guard = auth.guard
 
     app = FastAPI(
         title="sleight deploy",
@@ -185,6 +106,71 @@ def create_app(*, token: str | None = None) -> Any:
         version=_version(),
         dependencies=[Depends(guard)],
     )
+
+    from .agents import setup_agents
+    from .runtime import setup_runtime
+    from .viewer import setup_viewer
+    setup_runtime(app, jobs, enabled=runtime)
+    setup_agents(app)
+    from ...service.api import setup_service
+    setup_service(app, auth)
+
+    @app.middleware("http")
+    async def prefix(request: Request, call_next):
+        started = time.monotonic()
+        from ...service.identity import current
+        principal = auth.resolve(request.headers, request.cookies)
+        context_token = current.set(principal)
+        value = request.headers.get("x-forwarded-prefix", "")
+        if (value and request.headers.get("x-sleight-token") and principal
+                and value.startswith("/") and ".." not in value and not value.endswith("/")):
+            request.scope["root_path"] = value
+            # ASGI mounts strip root_path from the full path, including /assets.
+            path = request.scope["path"]
+            if path != value and not path.startswith(value + "/"):
+                request.scope["path"] = value + path
+                request.scope["raw_path"] = value.encode() + request.scope.get("raw_path", path.encode())
+        try:
+            response = await call_next(request)
+        finally:
+            current.reset(context_token)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            # Record method/path/status only; proxy URLs, bodies and headers can contain secrets.
+            try:
+                await asyncio.to_thread(Store().log_event, "console", "api", ok=response.status_code < 400,
+                                        detail=f"user={principal.user_id if principal else 'anonymous'} {request.method} {request.url.path} => {response.status_code}")
+                import uuid
+
+                from ...service.database import database
+                def record():
+                    with database().state("audit") as state:
+                        key = uuid.uuid4().hex
+                        state["records"][key] = {"id": key, "time": time.time(), "user": principal.user_id if principal else "anonymous",
+                            "token_id": principal.token_id if principal else "", "method": request.method, "path": request.url.path,
+                            "status": response.status_code, "duration_ms": round((time.monotonic() - started) * 1000)}
+                        for old in list(state["records"])[:-5000]:
+                            del state["records"][old]
+                await asyncio.to_thread(record)
+            except Exception:
+                log.warning("Unable to write API audit event")
+        return response
+
+    app.state.auth = auth
+    app.state.jobs = jobs
+    app.mount("/assets", StaticFiles(directory=INDEX.parent / "assets", check_dir=False), name="assets")
+
+    @app.post("/api/auth/login")
+    def login(request: Request, response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return auth.login(request, response, str(body.get("token") or ""))
+
+    @app.post("/api/auth/logout")
+    def logout(request: Request, response: Response) -> dict[str, Any]:
+        principal = auth.resolve({}, request.cookies)
+        if principal and principal.token_id:
+            auth.identity.revoke(principal.token_id)
+        auth.sessions.pop(request.cookies.get("sleight_session", ""), None)
+        response.delete_cookie("sleight_session", path=(request.scope.get("root_path", "") or "") + "/")
+        return {"ok": True}
 
     # ---------------------------------------------------------------- #
 
@@ -253,6 +239,8 @@ def create_app(*, token: str | None = None) -> Any:
         """把库里的异常翻成 HTTP 错误，而不是 500 + 一页 traceback。"""
         try:
             return fn()
+        except Busy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (DeployError, SleightError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
@@ -344,9 +332,7 @@ def create_app(*, token: str | None = None) -> Any:
             # 本机永远可选：装了 docker 就能一键部署，不必先配主机
             out.insert(0, {
                 **Host(name="local").to_dict(), "implicit": True,
-                "deployments": [
-                    Deployment(host="local", name="default", spec=DeploySpec()).to_dict()
-                ],
+                "deployments": [],
             })
         return out
 
@@ -358,6 +344,11 @@ def create_app(*, token: str | None = None) -> Any:
             raise HTTPException(status_code=400, detail="name is required")
         spec_fields = {k: v for k, v in (body.get("deploy") or {}).items() if v not in (None, "")}
         db = store()
+        old = db.get_host(name)
+        if old and not body.get("replace"):
+            if (str(body.get("ssh") or ""), bool(body.get("sudo"))) != (old.ssh, old.sudo):
+                raise HTTPException(409, "主机已登记；请使用原连接配置或不同主机代号")
+            return {"ok": True, "path": str(db.path), "ref": f"{name}/{body.get('deployment') or 'default'}"}
         wrap(lambda: db.put_host(Host(
             name=name,
             ssh=str(body.get("ssh") or ""),
@@ -368,7 +359,8 @@ def create_app(*, token: str | None = None) -> Any:
             notes=str(body.get("notes") or ""),
         )))
         deployment = str(body.get("deployment") or "default")
-        wrap(lambda: db.put_deployment(name, deployment, DeploySpec.from_dict(spec_fields)))
+        if not body.get("host_only"):
+            wrap(lambda: db.put_deployment(name, deployment, DeploySpec.from_dict(spec_fields)))
         return {"ok": True, "path": str(db.path), "ref": f"{name}/{deployment}"}
 
     @app.delete("/api/hosts/{name}")
@@ -393,6 +385,11 @@ def create_app(*, token: str | None = None) -> Any:
             raise HTTPException(status_code=400, detail="host and name are required")
         spec_fields = {k: v for k, v in (body.get("spec") or {}).items() if v not in (None, "")}
         db = store()
+        if db.get_deployment(host, name) and not body.get("replace"):
+            raise HTTPException(409, "部署代号已存在，请选择新的代号")
+        wanted = str(spec_fields.get("dir") or DeploySpec().dir).rstrip("/")
+        if any(d.name != name and d.spec.dir.rstrip("/") == wanted for d in db.deployments(host=host)):
+            raise HTTPException(409, "此目录已属于另一个部署，请选择独立目录")
         wrap(lambda: db.put_deployment(host, name, DeploySpec.from_dict(spec_fields)))
         return {"ok": True, "ref": f"{host}/{name}"}
 
@@ -400,6 +397,27 @@ def create_app(*, token: str | None = None) -> Any:
     def remove_deployment(host: str, name: str) -> dict[str, Any]:
         wrap(lambda: store().delete_deployment(host, name))
         return {"ok": True}
+
+    @app.post("/api/hosts/{name}/import")
+    def import_deployment(name: str, body: dict[str, Any] = Body(...)):
+        from ..importer import import_spec
+        db = store()
+        if name == "local":
+            db.ensure_local()
+        host = db.require_host(name)
+        deployment_name = str(body.get("name") or "default")
+        if db.get_deployment(name, deployment_name) and not body.get("replace"):
+            raise HTTPException(409, "部署代号已存在，请选择新的代号")
+        spec = wrap(lambda: import_spec(host.runner(), str(body.get("dir") or ""),
+                    filename=str(body.get("filename") or "docker-compose.yaml"),
+                    service=str(body.get("service") or "manager")))
+        return wrap(lambda: db.put_deployment(name, deployment_name, spec).to_dict())
+
+    @app.get("/api/hosts/{name}/capacity")
+    def capacity(name: str, deployment: str | None = None):
+        dep, _ = deployer(_ref(name, deployment))
+        with dep.connect() as manager:
+            return {**manager.governor.snapshot(), "system": manager.system_status()}
 
     @app.get("/api/events")
     def list_events(host: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -498,7 +516,7 @@ def create_app(*, token: str | None = None) -> Any:
             raise HTTPException(
                 status_code=404, detail=f"{dep.spec.env_path} 里没有 AUTH_TOKEN，还没部署过？"
             )
-        return {"token": value, "url": dep.spec.local_url, "env_path": dep.spec.env_path}
+        return {"token_hint": value[:4] + "…", "url": dep.spec.local_url, "env_path": dep.spec.env_path}
 
     @app.post("/api/hosts/{name}/rollback")
     def rollback(name: str, deployment: str | None = None) -> dict[str, Any]:
@@ -568,7 +586,9 @@ def create_app(*, token: str | None = None) -> Any:
     def profiles(name: str, deployment: str | None = None) -> list[dict[str, Any]]:
         raw = wrap(ProfileOps(deployer(_ref(name, deployment))[0]).list)
         for p in raw:
-            p["extension_paths"] = extension_paths([str(a) for a in (p.get("launch_args") or [])])
+            p["extension_paths"] = p.get("extension_paths") or extension_paths([str(a) for a in (p.get("launch_args") or [])])
+            from ...runtime.config import mask_proxy
+            p["proxy"] = mask_proxy(p.get("proxy", ""))
         return raw
 
     @app.post("/api/hosts/{name}/profiles")
@@ -580,13 +600,14 @@ def create_app(*, token: str | None = None) -> Any:
         ``auto_launch`` 一律 False —— 建的时候不该顺手拉起一个浏览器占着内存，
         要用时 ``lease()`` 会自己拉。
         """
+        body = app.state.templates.apply(body)
         profile_name = str(body.get("name") or "").strip()
         if not profile_name:
             raise HTTPException(status_code=400, detail="实例得有个名字")
         overrides: dict[str, Any] = {
-            "proxy": body.get("proxy"),
+            "proxy": body.get("proxy") or None,
+            "extension_paths": tuple(body.get("extension_paths") or []),
             "geoip": bool(body.get("geoip")),
-            "headless": bool(body.get("headless")),
             "notes": body.get("notes"),
             "tags": tuple(t.strip() for t in str(body.get("tags") or "").split(",") if t.strip()),
         }
@@ -685,7 +706,7 @@ def create_app(*, token: str | None = None) -> Any:
         name: str, deployment: str | None = None, body: dict[str, Any] = Body(default={})
     ) -> dict[str, Any]:
         ref = _ref(name, deployment)
-        only = body.get("only") or None
+        only = body.get("only")
         restart = bool(body.get("restart", True))
 
         def work(say: Callable[[str], None]) -> list[dict[str, Any]]:
@@ -735,19 +756,23 @@ def create_app(*, token: str | None = None) -> Any:
         return job.public()
 
     @app.get("/api/jobs/{job_id}/events")
-    def job_events(job_id: str) -> StreamingResponse:
+    def job_events(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
         """SSE。部署要几分钟，界面必须能一行一行看到进度。"""
         job = jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="no such job")
 
         def stream() -> Iterator[str]:
-            sent = 0
+            sent = max(after, int(request.headers.get("last-event-id", "0") or 0))
             while True:
-                lines = job.lines[sent:]
-                sent += len(lines)
+                if not auth.valid(request.headers, request.cookies):
+                    yield _sse("auth_expired", {"message": "凭据已失效，请重新登录"})
+                    return
+                sent = max(sent, job.log_offset)
+                lines = job.lines[sent - job.log_offset:]
                 for line in lines:
-                    yield _sse("line", {"text": line})
+                    sent += 1
+                    yield f"id: {sent}\n" + _sse("line", {"text": line, "cursor": sent})
                 if job.status != "running":
                     yield _sse("done", job.public())
                     return
@@ -760,6 +785,7 @@ def create_app(*, token: str | None = None) -> Any:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    setup_viewer(app, deployer)
     return app
 
 
@@ -787,32 +813,29 @@ def serve(*, host: str = "127.0.0.1", port: int = 8700, token: str | None = None
 
     :param host: 监听地址。默认只听本机
     :param port: 监听端口
-    :param token: 访问口令。绑非回环地址时必填
+    :param token: 可选管理员引导口令，首次启动可自动签发
     :returns: 退出码
-    :raises DeployError: 绑了对外地址却没给 token，或没装 fastapi/uvicorn
+    :raises DeployError: 没装 fastapi/uvicorn
     """
     _require_fastapi()
     try:
         import uvicorn
     except ModuleNotFoundError as exc:                     # pragma: no cover - 取决于环境
-        raise DeployError('the web UI needs uvicorn: pip install "sleight[ui]"') from exc
-
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = False
-    if not loopback and not token:
         raise DeployError(
-            f"refusing to listen on {host} without --token: this UI runs ssh and docker "
-            "commands on your hosts, so an open port is a remote execution surface"
-        )
+            "uvicorn is missing from this installation; repair it with: pip install sleight"
+        ) from exc
 
-    app = create_app(token=token)
+    import os
+    token = token or os.environ.get("SLEIGHT_UI_TOKEN")
+    from ...service.identity import Identity
+    identity = Identity()
+    if not token and not identity.users():
+        import secrets
+        token = "sl_" + secrets.token_urlsafe(32)
+        identity.ensure_admin(token)
+        print("首次管理员 token（仅显示一次，请保存）：" + token)
+    app = create_app(token=token, require_auth=True)
     print(f"sleight ui → http://{host}:{port}")
-    if token:
-        print(f"  口令 {token}  （界面会把它记在 localStorage）")
-        print(f"  直接带上：http://{host}:{port}/?token={token}")
-    else:
-        print("  只监听本机，没有口令。要对外开就必须 --token。")
+    print("  使用用户 token 登录；API 和 MCP 使用相同凭据。")
     uvicorn.run(app, host=host, port=port, log_level="info")
     return 0

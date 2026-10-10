@@ -1,13 +1,13 @@
 # sleight Wiki
 
-**像人一样驱动任何 CDP 浏览器。** Python ≥ 3.11，核心只有一个运行依赖（`websocket-client`），MIT。
+**像人一样驱动任何 CDP 浏览器。** Python ≥ 3.11，默认包含 XPath 与 Web 界面，MIT。
 
 这个库分三层，按你要做的事挑入口：
 
 | 层 | 做什么 | 从哪页开始 |
 |---|---|---|
 | **驱动层** | 导航、查找、拟人点击/输入/拖拽、iframe、截图、网络拦截 | [[浏览器操作API]] · [[拟人化详解]] |
-| **LLM 层** | 页面压成模型可读的快照 + 稳定 Ref、正文抽取、四工具网关、MCP server | [[Snapshot与Ref]] · [[MCP与Agent网关]] |
+| **LLM 层** | 页面压成模型可读的快照 + 稳定 Ref、正文抽取、五工具网关、MCP server | [[Snapshot与Ref]] · [[MCP与Agent网关]] |
 | **运维层** | 部署/运维 CloakBrowser Manager、插件下发、实例池、Web 界面 | [[远程部署]] · [[Web界面教程]] |
 
 ## 我想…

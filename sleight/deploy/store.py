@@ -1,7 +1,7 @@
 """本地 SQLite：主机、每台机上的若干 Manager、以及部署流水。
 
-放在 ``~/.sleight/sleight.db``（``$SLEIGHT_HOME`` 可改）。用标准库 ``sqlite3``，
-不引任何 ORM —— 这里就三张表。
+默认放在启动目录的 ``data/control.db``（``$SLEIGHT_HOME`` 可改）。
+通过统一数据库访问，支持 SQLite 和 PostgreSQL。
 
 **为什么从 TOML 换成 SQLite**：
 
@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..service.database import Connection, Database, database
 from .errors import DeployError
 from .inventory import LEGACY_FILENAME, read_legacy_toml, sleight_home
 from .runner import LocalRunner, Runner, SSHRunner
@@ -37,8 +38,9 @@ from .spec import DeploySpec
 
 __all__ = ["Deployment", "Event", "Host", "Store", "namespaced", "store_path"]
 
-FILENAME = "sleight.db"
+FILENAME = "control.db"
 SCHEMA_VERSION = 1
+_SCHEMA_LOCK = threading.Lock()
 
 #: 部署名会被拼进 compose 项目名和容器名，所以得先满足它们的字符集
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -201,9 +203,7 @@ class Store:
         self._shared: sqlite3.Connection | None = None
         if not self._memory:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with self._connect() as conn:
-            conn.executescript(SCHEMA)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self.db = Database("sqlite:///" + str(self.path), import_legacy=False) if path is not None else database()
         self._import_legacy_toml()
 
     # ------------------------------------------------------------------ #
@@ -215,26 +215,8 @@ class Store:
         ``:memory:`` 时复用同一个连接 —— 否则每次连接都是一个新的空库，测试里
         写进去的东西下一句就不见了。
         """
-        with self._lock:
-            if self._memory:
-                if self._shared is None:
-                    self._shared = sqlite3.connect(":memory:", check_same_thread=False)
-                    self._shared.row_factory = sqlite3.Row
-                    self._shared.execute("PRAGMA foreign_keys = ON")
-                conn = self._shared
-                with conn:
-                    yield conn
-                return
-            conn = sqlite3.connect(self.path, timeout=10.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            # WAL：Web 界面和 CLI 常常同时开着，读不该被写堵住
-            conn.execute("PRAGMA journal_mode = WAL")
-            try:
-                with conn:
-                    yield conn
-            finally:
-                conn.close()
+        with self._lock, self.db.transaction() as conn:
+            yield Connection(conn)
 
     def _import_legacy_toml(self) -> None:
         """把 0.2.x 的 ``hosts.toml`` 导进来。只做一次，原文件改名保留。"""
@@ -466,6 +448,7 @@ class Store:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (_now(), host, deployment, kind, int(ok), detail[:2000]),
                 )
+                conn.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 10000)")
         except sqlite3.Error:                       # pragma: no cover - 磁盘满之类
             pass
 

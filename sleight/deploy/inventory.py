@@ -1,4 +1,4 @@
-"""``~/.sleight/`` 的位置，以及**旧版 ``hosts.toml`` 的只读导入**。
+"""启动目录下 ``data/`` 的位置，以及旧版 ``hosts.toml`` 的只读导入。
 
 0.2.x 用 ``hosts.toml`` 存主机清单。从 0.3 起改成 SQLite（见 :mod:`sleight.deploy.store`）
 —— 一台机器可以跑多个 Manager，还要记部署流水，TOML 那种"一主机一份配置"的形状撑不住。
@@ -26,7 +26,7 @@ def sleight_home() -> Path:
     """配置目录。``$SLEIGHT_HOME`` 优先 —— 单测靠它隔离，不去碰真的 home。"""
     if env := os.environ.get("SLEIGHT_HOME"):
         return Path(env).expanduser()
-    return Path.home() / ".sleight"
+    return Path.cwd() / "data"
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
 import time
@@ -34,6 +35,7 @@ from ..core.types import InstanceStatus
 from ..providers.cloakbrowser import CloakBrowserManager
 from .engine import Deployer
 from .errors import DeployError
+from .runner import LocalRunner
 
 log = logging.getLogger("sleight.deploy.ops")
 
@@ -179,6 +181,7 @@ class VerifyReport:
     running: bool
     loaded: set[str] = field(default_factory=set)
     expected: int = 0
+    evidence: str = "cdp-targets"
 
     @property
     def ok(self) -> bool:
@@ -191,8 +194,10 @@ class VerifyReport:
         if not self.expected:
             return f"{self.name or self.id}: 没配置扩展"
         got = len(self.loaded)
+        if not self.ok and self.evidence == "cdp-targets":
+            return f"{self.name or self.id}: 观察到 {got}/{self.expected} 个扩展 target；MV3 worker 可能休眠，需检查实际页面效果"
         mark = "✓" if self.ok else "✗"
-        return f"{mark} {self.name or self.id}: 加载了 {got}/{self.expected} 个扩展"
+        return f"{mark} {self.name or self.id}: 加载了 {got}/{self.expected} 个扩展 ({self.evidence})"
 
 
 # --------------------------------------------------------------------------- #
@@ -229,6 +234,13 @@ class ExtensionOps:
         ``manifest.json`` 用 ``cat`` 取回来在**控制机上**解析 —— 目标机上不一定有
         python，容器里那个也不该为了看一眼 manifest 就 exec 进去。
         """
+        if self.spec.data_volume:
+            result = self.dep.probe(["docker", "exec", self.spec.container_name, "ls", "-1", self.spec.container_extensions_dir])
+            result.check()
+            return [self._inspect(p, "") for p in result.out.splitlines() if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", p)]
+        if os.name == "nt" and isinstance(self.runner, LocalRunner):
+            root = Path(self.spec.extensions_dir)
+            return [self._inspect(p.name, str(p)) for p in sorted(root.iterdir()) if p.is_dir()] if root.is_dir() else []
         listing = self.runner.run(
             ["sh", "-c", f"ls -1 {_q(self.spec.extensions_dir)} 2>/dev/null || true"]
         )
@@ -241,8 +253,18 @@ class ExtensionOps:
         return out
 
     def _inspect(self, dirname: str, host_path: str) -> Extension:
+        if self.spec.data_volume:
+            target = f"{self.spec.container_extensions_dir}/{dirname}"
+            manifest = self.dep.probe(["docker", "exec", self.spec.container_name, "cat", target + "/manifest.json"])
+            data = _parse_manifest(manifest.out)
+            return Extension(dirname, target, str(data.get("name", "")), str(data.get("version", "")), int(data.get("manifest_version") or 0))
         manifest = self.runner.read_text(f"{host_path}/manifest.json", sudo=self.dep.sudo) or ""
         data = _parse_manifest(manifest)
+        if os.name == "nt" and isinstance(self.runner, LocalRunner):
+            return Extension(dirname, f"{self.spec.container_extensions_dir}/{dirname}",
+                             str(data.get("name", "")), str(data.get("version", "")),
+                             int(data.get("manifest_version") or 0),
+                             sum(p.is_file() for p in Path(host_path).rglob("*")))
         files = self.runner.run(
             ["sh", "-c", f"find {_q(host_path)} -type f | wc -l"]
         )
@@ -290,13 +312,26 @@ class ExtensionOps:
             )
 
         dirname = name or src.name
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", dirname) or dirname in (".", ".."):
+            raise DeployError("Extension directory name must be a single safe path component")
+        if self.spec.data_volume:
+            stage = f"{self.spec.dir}/extension-staging/{dirname}"
+            target = f"{self.spec.container_extensions_dir}/{dirname}"
+            if not self.dep.dry_run:
+                self.runner.put_dir(str(src), stage, sudo=self.dep.sudo)
+            self.dep.mutate(["docker", "exec", self.spec.container_name, "mkdir", "-p", target]).check()
+            self.dep.mutate(["docker", "cp", f"{stage}/.", f"{self.spec.container_name}:{target}"]).check()
+            self.dep.mutate(["docker", "exec", self.spec.container_name, "chmod", "-R", "a+rX", target]).check()
+            self._say(f"插件已复制到 Docker volume: {target}")
+            return Extension(dirname, target, str(local.get("name", "")), str(local.get("version", "")), mv) if self.dep.dry_run else self._inspect(dirname, "")
         host = f"{self.spec.extensions_dir}/{dirname}"
         self.dep.mutate(["mkdir", "-p", self.spec.extensions_dir], sudo=self.dep.sudo)
         self._say(f"传 {src} → {self.runner.label}:{host}")
         if not self.dep.dry_run:
             self.runner.put_dir(str(src), host, sudo=self.dep.sudo)
         # 容器里的浏览器进程不是 root；a+rX 给所有人读、目录给进入权限，不给文件加执行位
-        self.dep.mutate(["chmod", "-R", "a+rX", self.spec.extensions_dir], sudo=self.dep.sudo)
+        if not (os.name == "nt" and isinstance(self.runner, LocalRunner)):
+            self.dep.mutate(["chmod", "-R", "a+rX", self.spec.extensions_dir], sudo=self.dep.sudo)
 
         if self.dep.dry_run:
             return Extension(
@@ -322,6 +357,11 @@ class ExtensionOps:
 
     def remove(self, dirname: str) -> None:
         """删掉目标机上的一个插件目录。``apply()`` 之后才会真的从 profile 上摘掉。"""
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", dirname) or dirname in (".", ".."):
+            raise DeployError("Unsafe extension directory name")
+        if self.spec.data_volume:
+            self.dep.mutate(["docker", "exec", self.spec.container_name, "rm", "-rf", f"{self.spec.container_extensions_dir}/{dirname}"]).check()
+            return
         host = f"{self.spec.extensions_dir}/{dirname}"
         if not self.runner.run(["test", "-d", host]).ok:
             raise NotFound(f"no extension directory {dirname!r} on {self.runner.label}")
@@ -378,13 +418,17 @@ class ExtensionOps:
     ) -> ProfileChange:
         pid = str(raw.get("id", ""))
         name = str(raw.get("name") or "")
-        before = [str(a) for a in (raw.get("launch_args") or [])]
+        modern = "extension_paths" in raw
+        before = merge_launch_args(raw.get("launch_args") or [], raw["extension_paths"]) if modern else [str(a) for a in (raw.get("launch_args") or [])]
         after = merge_launch_args(before, paths)
         if after == before:
             return ProfileChange(pid, name, before, after, updated=False)
 
         if not self.dep.dry_run:
-            mgr.update_profile(pid, launch_args=after)
+            if modern:
+                mgr.update_profile(pid, extension_paths=paths)
+            else:
+                mgr.update_profile(pid, launch_args=after)
         stopped = False
         if restart and raw.get("status") == "running":
             # 参数只在进程启动时读，所以必须停一次。不用手动拉起 ——
@@ -422,7 +466,7 @@ class ExtensionOps:
             for raw in mgr.list_profiles():
                 pid = str(raw.get("id", ""))
                 name = str(raw.get("name") or "")
-                expected = len(extension_paths([str(a) for a in (raw.get("launch_args") or [])]))
+                expected = len(raw.get("extension_paths") or extension_paths([str(a) for a in (raw.get("launch_args") or [])]))
                 running = raw.get("status") == "running"
                 if not running and launch:
                     self._say(f"拉起 {name or pid}")
@@ -432,7 +476,17 @@ class ExtensionOps:
                     reports.append(VerifyReport(pid, name, False, expected=expected))
                     continue
                 loaded = self._poll_targets(mgr, pid, expected=expected, settle=settle)
-                report = VerifyReport(pid, name, True, loaded, expected)
+                evidence = "cdp-targets"
+                if expected and hasattr(mgr, "lease"):
+                    try:
+                        with mgr.lease(instance_id=pid) as handle, handle.session(track_network=False) as session:
+                            session.open("chrome://extensions/")
+                            inventory = session.eval("new Promise(resolve => chrome.developerPrivate.getExtensionsInfo({includeDisabled:true}, resolve))")
+                            loaded = {p["id"] for p in inventory if p.get("state") == "ENABLED" and p.get("location") == "UNPACKED"}
+                            evidence = "chromium-inventory"
+                    except Exception as exc:
+                        self._say(f"{name or pid}: 无法读取浏览器插件清单 ({type(exc).__name__})，使用 CDP target 观察")
+                report = VerifyReport(pid, name, True, loaded, expected, evidence)
                 self._say(report.summary)
                 reports.append(report)
         return reports
@@ -467,7 +521,7 @@ class ExtensionOps:
         rows: list[dict[str, Any]] = []
         with self.dep.connect(token=token) as mgr:
             for raw in mgr.list_profiles():
-                configured = set(extension_paths([str(a) for a in (raw.get("launch_args") or [])]))
+                configured = set(raw.get("extension_paths") or extension_paths([str(a) for a in (raw.get("launch_args") or [])]))
                 rows.append({
                     "id": raw.get("id"),
                     "name": raw.get("name") or "",

@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from sleight.deploy.engine import Deployer
-from sleight.deploy.errors import DeployError, PreflightFailed
+from sleight.deploy.errors import CommandFailed, DeployError, PreflightFailed
 from sleight.deploy.render import parse_env
+from sleight.deploy.runner import PULL_TIMEOUT
 from sleight.deploy.spec import DeploySpec
 
 from .conftest import FakeRunner, docker_ok
@@ -104,6 +106,47 @@ def test_apply_creates_data_and_backups():
     dep.apply()
     assert "/srv/cbm/data" in runner.dirs
     assert "/srv/cbm/backups" in runner.dirs
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_named_volume_bootstrap_pulls_missing_image_before_short_lived_helper(cached):
+    dep, runner = make(spec=replace(SPEC, data_volume="test-store"), replies={
+        "docker volume create": (0, "test-store"),
+        "docker image inspect": (0, "sha256:cached") if cached else (1, "missing"),
+        "docker pull": (0, "downloaded"),
+        "docker run": (0, ""),
+    })
+    calls = []
+    original = runner.run
+
+    def spy(argv, **kw):
+        calls.append((tuple(argv), kw.get("timeout")))
+        return original(argv, **kw)
+
+    runner.run = spy
+    dep.apply(wait=False)
+    helpers = [i for i, (argv, _) in enumerate(calls) if argv[:2] == ("docker", "run")]
+    pulls = [(i, timeout) for i, (argv, timeout) in enumerate(calls) if argv[:2] == ("docker", "pull")]
+    assert len(helpers) == 1
+    if cached:
+        assert pulls == []
+    else:
+        assert len(pulls) == 1
+        assert pulls[0][0] < helpers[0]
+        assert pulls[0][1] == PULL_TIMEOUT
+        assert any("初始化数据卷前拉镜像" in line for line in dep.steps)
+
+
+def test_named_volume_bootstrap_does_not_start_helper_when_image_download_fails():
+    dep, runner = make(spec=replace(SPEC, data_volume="test-store"), replies={
+        "docker volume create": (0, "test-store"),
+        "docker image inspect": (1, "missing"),
+        "docker pull": (1, "registry unavailable"),
+    })
+    with pytest.raises(CommandFailed, match="registry unavailable"):
+        dep.apply(wait=False)
+    assert not runner.ran("docker", "run")
+    assert not runner.ran("docker", "compose", "up")
 
 
 def test_apply_order_is_pull_then_up():
@@ -386,11 +429,12 @@ def test_upgrade_needs_something_to_upgrade():
 
 def test_upgrade_rewrites_the_image_and_remembers_the_old_one():
     dep, runner = deployed()
-    dep.upgrade("cloakhq/cloakbrowser-manager:v0.0.11", backup=False, wait=False)
+    dep.upgrade("cloakhq/cloakbrowser-manager:v0.0.11", backup=True, wait=False)
     env = parse_env(runner.files["/srv/cbm/.env"])
     assert env["MANAGER_IMAGE"] == "cloakhq/cloakbrowser-manager:v0.0.11"
     state = json.loads(runner.files["/srv/cbm/.sleight-deploy.json"])
-    assert state["previous_image"] == "cloakhq/cloakbrowser-manager:v0.0.10"
+    assert state["previous_image"] == SPEC.image
+    assert state["rollback"]["archive"].endswith(".tar.gz")
     assert runner.ran("docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "manager")
 
 
@@ -402,17 +446,42 @@ def test_upgrade_backs_up_first_by_default():
 
 def test_rollback_uses_the_recorded_previous_image():
     dep, runner = deployed()
-    dep.upgrade("repo/img:v2", backup=False, wait=False)
+    dep.upgrade("repo/img:v2", backup=True, wait=False)
     dep.rollback(wait=False)
     assert parse_env(runner.files["/srv/cbm/.env"])["MANAGER_IMAGE"] == (
-        "cloakhq/cloakbrowser-manager:v0.0.10"
+        SPEC.image
     )
 
 
 def test_rollback_without_history_says_so():
     dep, _ = deployed()
-    with pytest.raises(DeployError, match="previous_image"):
+    with pytest.raises(DeployError, match="upgrade snapshot"):
         dep.rollback()
+
+
+def test_failed_upgrade_restores_previous_environment(monkeypatch):
+    dep, _ = deployed()
+    previous = dep.spec
+    recovered = []
+    monkeypatch.setattr(dep, "apply", lambda **kw: (_ for _ in ()).throw(DeployError("health failed")))
+
+    def recover(**kw):
+        recovered.append(dep.read_state()["rollback"])
+        dep.spec = previous
+
+    monkeypatch.setattr(dep, "rollback", recover)
+    with pytest.raises(DeployError, match="previous environment restored"):
+        dep.upgrade("repo/img:v2")
+    assert recovered[0]["spec"]["image"] == previous.image
+    assert recovered[0]["archive"].endswith(".tar.gz")
+    assert dep.spec == previous
+
+
+def test_failed_apply_never_records_successful_deployment():
+    dep, runner = make(replies={"docker compose up": (1, "create failed")})
+    with pytest.raises(DeployError):
+        dep.apply()
+    assert dep.spec.state_path not in runner.files
 
 
 def test_a_corrupt_state_file_does_not_break_status():

@@ -17,7 +17,7 @@ import io
 import json
 import urllib.error
 import urllib.request
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -110,7 +110,7 @@ class FakeManager:
 
 def manager(monkeypatch: pytest.MonkeyPatch, routes: dict) -> tuple[CloakBrowserManager, FakeManager]:
     http = FakeManager(routes).install(monkeypatch)
-    mgr = CloakBrowserManager(BASE, token=TOKEN, name="cb")
+    mgr = CloakBrowserManager(BASE, token=TOKEN, name="cb", api_generation="legacy")
     mgr.ready_poll = 0.001
     mgr.ready_timeout = 0.05
     return mgr, http
@@ -489,6 +489,43 @@ def test_delete_of_a_stopped_profile_needs_no_force(monkeypatch: pytest.MonkeyPa
     assert http.paths("POST") == []
 
 
+def test_forced_delete_waits_for_manager_closing_guard(monkeypatch):
+    replies = iter([(409, {"detail": "Profile is running or changing state"}), (204, None)])
+    mgr, http = manager(monkeypatch, {
+        ("GET", "/api/profiles/p1/status"): ST_STOPPED,
+        ("DELETE", "/api/profiles/p1"): lambda *args: next(replies),
+    })
+    mgr.delete_profile("p1", force=True)
+    assert http.paths("DELETE") == ["/api/profiles/p1", "/api/profiles/p1"]
+    assert not http.paths("POST")
+
+
+@pytest.mark.parametrize("force,status", [(False, 409), (True, 500)])
+def test_delete_does_not_retry_unforced_conflicts_or_server_errors(monkeypatch, force, status):
+    mgr, http = manager(monkeypatch, {
+        ("GET", "/api/profiles/p1/status"): ST_STOPPED,
+        ("DELETE", "/api/profiles/p1"): (status, {"detail": "fixture failure"}),
+    })
+    with pytest.raises(InstanceError):
+        mgr.delete_profile("p1", force=force)
+    assert http.paths("DELETE") == ["/api/profiles/p1"]
+
+
+def test_forced_delete_keeps_governor_slot_when_conflict_outlasts_deadline(monkeypatch):
+    from unittest.mock import Mock
+
+    mgr, http = manager(monkeypatch, {
+        ("GET", "/api/profiles/p1/status"): ST_STOPPED,
+        ("DELETE", "/api/profiles/p1"): (409, {"detail": "Profile is changing state"}),
+    })
+    mgr.ready_timeout = .01
+    mgr.governor = Mock()
+    with pytest.raises(InstanceError, match="409"):
+        mgr.delete_profile("p1", force=True)
+    assert 1 <= len(http.paths("DELETE")) <= 10
+    mgr.governor.deleted.assert_not_called()
+
+
 def test_delete_of_an_unknown_id_is_not_found(monkeypatch: pytest.MonkeyPatch):
     mgr, _ = manager(monkeypatch, {("GET", "/api/profiles/zz/status"): ST_MISSING})
     with pytest.raises(NotFound):
@@ -716,7 +753,7 @@ def profile(name, *, pid=None, tags=(), created=None, status="stopped"):
 
 FLEET = [
     profile("reuters-test-1", tags=("scratch",), created="2026-01-01T00:00:00Z"),
-    profile("reuters-test-2", tags=("scratch", "us"), created="2026-08-06T00:00:00Z"),
+    profile("reuters-test-2", tags=("scratch", "us"), created=datetime.now(UTC).isoformat()),
     profile("prod-hk-01", tags=("us",), created="2026-01-01T00:00:00Z"),
     profile("no-timestamp"),
 ]

@@ -1,6 +1,6 @@
-"""Web 界面。需要 ``pip install "sleight[ui]"``。
+"""Web 界面及其依赖包含在默认安装中。
 
-单独一个子包，**引擎不依赖它** —— 命令行和 Python API 在没装 fastapi 的机器上照常工作。
+单独一个子包，**引擎不依赖它** —— 命令行和 Python API 不会主动导入 Web 框架。
 """
 
 from __future__ import annotations

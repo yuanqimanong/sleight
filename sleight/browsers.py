@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import tarfile
 import urllib.request
@@ -86,7 +87,7 @@ def _this_platform() -> str:
 
 
 def browsers_home() -> Path:
-    """内核安装根目录（``$SLEIGHT_HOME/browsers``，默认 ``~/.sleight/browsers``）。"""
+    """内核安装根目录（``$SLEIGHT_HOME/browsers``，默认 ``./data/browsers``）。"""
     return sleight_home() / "browsers"
 
 
@@ -144,11 +145,27 @@ def _unpack(archive: Path, into: Path, plat: str) -> None:
             tar.extractall(into, filter="data")
     elif name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
-            for member in zf.namelist():
-                target = (into / member).resolve()
-                if not str(target).startswith(str(into.resolve())):
-                    raise SleightError(f"refusing zip member escaping the target dir: {member}")
-            zf.extractall(into)
+            root = into.resolve()
+            links = []
+            for member in zf.infolist():
+                target = (root / member.filename).resolve()
+                if not target.is_relative_to(root):
+                    raise SleightError(f"refusing zip member escaping the target dir: {member.filename}")
+                mode = member.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    link = zf.read(member).decode('utf-8')
+                    if os.path.isabs(link) or not (target.parent / link).resolve().is_relative_to(root):
+                        raise SleightError(f"refusing zip link escaping the target dir: {member.filename}")
+                    links.append((target, link))
+                else:
+                    zf.extract(member, root)
+                    if mode and not member.is_dir():
+                        target.chmod(mode & 0o777)
+            # macOS .app bundles use framework symlinks. Create after regular files,
+            # so archive members can never write through an earlier link.
+            for target, link in links:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(link, target)
     elif name.endswith(".dmg"):
         if plat != "macos":
             raise SleightError("a .dmg can only be unpacked on macOS")

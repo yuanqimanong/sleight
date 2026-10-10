@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from .errors import DeployError, PreflightFailed
 from .preflight import Check, CheckLevel, preflight, worst
-from .render import parse_env, render_compose, render_env
+from .render import merge_compose, parse_env, render_env
 from .runner import PULL_TIMEOUT, CommandResult, Runner, describe
 from .spec import CONTAINER_PORT, DeploySpec, generate_token
 
@@ -151,7 +151,9 @@ class Deployer:
 
     def compose_argv(self, *args: str) -> list[str]:
         """``docker compose`` 命令。工作目录是部署目录，``.env`` 因此会被自动读取。"""
-        return ["docker", "compose", *args]
+        if self.spec.compose_filename == "docker-compose.yaml":
+            return ["docker", "compose", *args]
+        return ["docker", "compose", "-f", self.spec.compose_path, *args]
 
     def _compose(
         self, *args: str, timeout: float | None = None, mutate: bool = True, check: bool = True
@@ -176,6 +178,22 @@ class Deployer:
         **存量 token 绝不无声更换** —— 换掉等于所有在用的客户端同时 401，而且旧 token
         在别的机器的环境变量里，找回来很麻烦。
         """
+        text = self.runner.read_text(self.spec.compose_path, sudo=self.sudo)
+        if text:
+            import yaml
+
+            raw = yaml.safe_load(text) or {}
+            env = raw.get("services", {}).get(self.spec.service_name, {}).get("environment", {})
+            if isinstance(env, list):
+                env = dict(e.split("=", 1) if "=" in e else (e, None) for e in env)
+            inline = env.get("AUTH_TOKEN")
+            if inline and "$" not in str(inline):
+                return str(inline)
+            if inline and not self.existing_env().get("AUTH_TOKEN"):
+                resolved = self.probe(["docker", "compose", "-f", self.spec.compose_path,
+                                       "config", "--format", "json"], cwd=self.spec.dir)
+                if resolved.ok:
+                    return json.loads(resolved.out)["services"][self.spec.service_name].get("environment", {}).get("AUTH_TOKEN")
         return self.existing_env().get("AUTH_TOKEN") or None
 
     def read_state(self) -> dict[str, Any]:
@@ -209,9 +227,11 @@ class Deployer:
         ``/api/status`` 免鉴权，所以不需要把 token 传进命令行。
         """
         script = (
-            "import urllib.request,sys;"
+            "import urllib.request,sys,os;"
             f"sys.stdout.write(urllib.request.urlopen("
-            f"'http://127.0.0.1:{CONTAINER_PORT}/api/status', timeout=5).read().decode())"
+            f"urllib.request.Request('http://127.0.0.1:{CONTAINER_PORT}/api/status', "
+            "headers={'Authorization':'Bearer '+os.environ.get('AUTH_TOKEN','')}), "
+            "timeout=5).read().decode())"
         )
         r = self.probe(
             ["docker", "exec", self.spec.container_name, "python", "-c", script], timeout=30
@@ -242,8 +262,8 @@ class Deployer:
         checks = preflight(self.spec, self.runner, sudo=self.sudo)
 
         env = self.existing_env()
-        token = env.get("AUTH_TOKEN") or generate_token()
-        compose_text = render_compose(self.spec)
+        token = self.existing_token() or generate_token()
+        compose_text = merge_compose(self.runner.read_text(self.spec.compose_path, sudo=self.sudo), self.spec)
         env_text = render_env(self.spec, token, extra=env)
         files = {self.spec.compose_path: compose_text, self.spec.env_path: env_text}
 
@@ -275,7 +295,7 @@ class Deployer:
 
         commands: list[tuple[str, ...]] = []
         if changes:
-            commands.append(tuple(self.compose_argv("pull", "manager")))
+            commands.append(tuple(self.compose_argv("pull", self.spec.service_name)))
             commands.append(tuple(self.compose_argv("up", "-d")))
 
         return Plan(self.spec, checks, files, changes, commands, self.spec.warnings())
@@ -329,11 +349,10 @@ class Deployer:
             self.say(f"写入 {path}")
             wrote = True
 
-        self.write_file(self._state_json(), self.spec.state_path, mode=0o644)
-
         changed = wrote or force_recreate or self.container_state()["status"] != "running"
         if not changed:
             self.say("目标机已经是这个状态，不动容器")
+            self.write_file(self._state_json(), self.spec.state_path, mode=0o600)
             return DeployResult(self.spec, token, False, self.steps, self.api_status())
 
         if pull:
@@ -341,13 +360,14 @@ class Deployer:
 
         up = ["up", "-d"]
         if force_recreate:
-            up += ["--no-deps", "--force-recreate", "manager"]
+            up += ["--no-deps", "--force-recreate", self.spec.service_name]
         self.say("docker compose " + " ".join(up))
         self._compose(*up, timeout=600).check()
 
         status: dict[str, Any] = {}
         if wait and not self.dry_run:
             status = self.wait_healthy()
+        self.write_file(self._state_json(), self.spec.state_path, mode=0o600)
         return DeployResult(self.spec, token, True, self.steps, status)
 
     def _pull(self) -> None:
@@ -361,7 +381,7 @@ class Deployer:
             ["docker", "image", "inspect", self.spec.image, "--format", "{{.Id}}"]
         ).ok
         self.say(f"拉镜像 {self.spec.image}（可能要几分钟）")
-        result = self._compose("pull", "manager", timeout=PULL_TIMEOUT, check=False)
+        result = self._compose("pull", self.spec.service_name, timeout=PULL_TIMEOUT, check=False)
         if result.ok:
             return
         reason = (result.err.strip() or result.out.strip() or "(no output)").splitlines()[-1]
@@ -387,6 +407,14 @@ class Deployer:
         created = not self.probe(["test", "-d", self.spec.dir]).ok
         for path in (self.spec.dir, self.spec.data_dir, self.spec.backups_dir):
             self.mutate(["mkdir", "-p", path], sudo=self.sudo)
+        if self.spec.data_volume:
+            self.mutate(["docker", "volume", "create", "--label", "sleight.managed=1", self.spec.data_volume]).check()
+            # 冷部署不能让短时运行的辅助容器隐式下载整个 Manager 镜像。
+            if not self.probe(["docker", "image", "inspect", self.spec.image, "--format", "{{.Id}}"]).ok:
+                self.say(f"初始化数据卷前拉镜像 {self.spec.image}（可能要几分钟）")
+                self.mutate(["docker", "pull", self.spec.image], timeout=PULL_TIMEOUT).check()
+            self.as_root("mkdir -p /store/data/extensions /store/backups",
+                         mounts=[(self.spec.data_volume, "/store")]).check()
         if created:
             self.say(f"创建 {self.spec.dir}")
             if self.sudo:
@@ -408,6 +436,7 @@ class Deployer:
             ),
             "deployed_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "managed_by": "sleight",
+            "rollback": previous.get("rollback"),
         }
         return json.dumps(state, indent=2, ensure_ascii=False) + "\n"
 
@@ -469,7 +498,7 @@ class Deployer:
 
     def logs(self, *, tail: int = 200) -> str:
         """取一段日志。``follow`` 交给 CLI —— 那需要把子进程的输出直接接到终端上。"""
-        r = self._compose("logs", "--tail", str(tail), "manager", mutate=False, timeout=60)
+        r = self._compose("logs", "--tail", str(tail), self.spec.service_name, mutate=False, timeout=60)
         return r.out or r.err
 
     def backup(self) -> str:
@@ -489,15 +518,19 @@ class Deployer:
         :raises DeployError: 打包失败。失败时不会留下任何 ``.tar.gz``
         """
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        name = f"cloakbrowser-{stamp}.tar.gz"
+        import uuid
+        name = f"cloakbrowser-{stamp}-{uuid.uuid4().hex[:8]}.tar.gz"
         archive = f"{self.spec.backups_dir}/{name}"
         self.mutate(["mkdir", "-p", self.spec.backups_dir], sudo=self.sudo)
         running = self.container_state()["status"] == "running"
         if running:
             self.say("停 manager（一致性备份必须停机）")
-            self._compose("stop", "manager", timeout=180).check()
+            self._compose("stop", self.spec.service_name, timeout=180).check()
         try:
             self.say(f"归档 data/ → {archive}")
+            if self.spec.data_volume:
+                self._volume_backup(name, archive)
+                return archive
             # 容器里是 root，产出的文件默认归 root —— 那样用户连删旧备份都要 sudo。
             # 取不到 uid 就干脆不 chown：宁可留个 root 拥有的档，也不能 chown 到 0:0。
             owner = self._host_owner()
@@ -521,8 +554,27 @@ class Deployer:
         finally:
             if running:
                 self.say("重新启动 manager")
-                self._compose("start", "manager", timeout=180)
+                self._compose("start", self.spec.service_name, timeout=180)
         return archive
+
+    def _volume_backup(self, name: str, archive: str) -> None:
+        """Export a stopped-data archive without sharing the controller filesystem."""
+        import uuid
+
+        helper = "sleight-backup-" + uuid.uuid4().hex
+        script = (f"tar -czf /store/backups/{name}.part -C /store data && "
+                  f"mv /store/backups/{name}.part /store/backups/{name}")
+        created = False
+        try:
+            self.mutate(["docker", "create", "--name", helper, "--label", "sleight.operation=backup",
+                         "--memory", "256m", "--pids-limit", "64", "--entrypoint", "sh",
+                         "-v", f"{self.spec.data_volume}:/store", self.spec.image, "-c", script]).check()
+            created = True
+            self.mutate(["docker", "start", "-a", helper], timeout=3600).check()
+            self.mutate(["docker", "cp", f"{helper}:/store/backups/{name}", archive], timeout=3600).check()
+        finally:
+            if created:
+                self.mutate(["docker", "rm", helper], check=False)
 
     def as_root(
         self, script: str, *, mounts: list[tuple[str, str]], timeout: float = 300.0
@@ -539,7 +591,7 @@ class Deployer:
         :param timeout: 超时，秒
         :returns: :class:`~sleight.deploy.runner.CommandResult`，**非 0 不抛**
         """
-        argv = ["docker", "run", "--rm", "--entrypoint", "sh"]
+        argv = ["docker", "run", "--rm", "--memory", "256m", "--cpus", "1", "--pids-limit", "64", "--entrypoint", "sh"]
         for source, target in mounts:
             argv += ["-v", f"{source}:{target}"]
         argv += [self.spec.image, "-c", script]
@@ -569,12 +621,33 @@ class Deployer:
                 "the image of an existing one"
             )
         previous = self.existing_env().get("MANAGER_IMAGE") or self.read_state().get("image")
-        if backup:
-            self.backup()
+        if not backup:
+            raise DeployError("An upgrade needs a data backup for schema-safe rollback")
+        archive = self.backup()
+        snapshot = self.read_state()
+        snapshot["rollback"] = {"image": previous or self.spec.image, "archive": archive,
+                                "spec": self.spec.to_dict()}
+        for source, suffix in ((self.spec.compose_path, "compose"), (self.spec.env_path, "env")):
+            content = self.runner.read_text(source, sudo=self.sudo)
+            if content is None and suffix == "env":
+                content = ""
+            if content is None:
+                raise DeployError("Upgrade snapshot is incomplete")
+            self.write_file(content, f"{self.spec.dir}/.sleight-upgrade.{suffix}", mode=0o600)
+        self.write_file(json.dumps(snapshot), self.spec.state_path, mode=0o600)
         self.spec = self.spec.replace(image=image)
         self.say(f"镜像 {previous or '?'} → {image}")
-        result = self.apply(pull=True, wait=wait, force_recreate=True)
-        self.say("验收：容器 healthy、profile 数量/ID 未变、抽样 profile 能启动并过 CDP")
+        try:
+            result = self.apply(pull=True, wait=wait, force_recreate=True)
+        except Exception as exc:
+            self.say("升级失败，恢复升级前镜像、数据和配置")
+            try:
+                self.rollback(wait=wait)
+            except Exception as restore_error:
+                raise DeployError(f"Upgrade failed: {exc}; automatic rollback also failed: {restore_error}. "
+                                  f"Backup: {archive}") from restore_error
+            raise DeployError(f"Upgrade failed; previous environment restored: {exc}") from exc
+        self.say("容器已就绪。请验收 profile 数量/ID、抽样 CDP、Cookie 和插件。")
         return result
 
     def rollback(self, *, wait: bool = True) -> DeployResult:
@@ -582,13 +655,73 @@ class Deployer:
 
         :raises DeployError: 状态文件里没有旧镜像可回
         """
-        previous = self.read_state().get("previous_image")
-        if not previous:
+        rollback = self.read_state().get("rollback")
+        if not rollback or not rollback.get("archive"):
             raise DeployError(
-                f"{self.spec.state_path} has no previous_image to roll back to; "
-                "pass the old tag to upgrade() explicitly"
+                "No complete upgrade snapshot. Restoring just an image could corrupt migrated data."
             )
-        return self.upgrade(previous, backup=False, wait=wait)
+        # Keep the current data too, so a rollback itself can be investigated/recovered.
+        self.backup()
+        compose = self.runner.read_text(f"{self.spec.dir}/.sleight-upgrade.compose", sudo=self.sudo)
+        env = self.runner.read_text(f"{self.spec.dir}/.sleight-upgrade.env", sudo=self.sudo)
+        if compose is None or env is None:
+            raise DeployError("Upgrade compose/env snapshot is missing; rollback cancelled")
+        self._compose("stop", self.spec.service_name, timeout=180).check()
+        self.restore_data(rollback["archive"])
+        self.spec = DeploySpec.from_dict(rollback["spec"])
+        self.write_file(compose, self.spec.compose_path, mode=0o644)
+        self.write_file(env, self.spec.env_path, mode=0o600)
+        self._compose("up", "-d", "--force-recreate", self.spec.service_name, timeout=600).check()
+        status = self.wait_healthy() if wait else {}
+        self.write_file(self._state_json(), self.spec.state_path, mode=0o600)
+        return DeployResult(self.spec, self.existing_token() or "", True, self.steps, status)
+
+    def restore_data(self, archive: str) -> None:
+        """Validate and stage an archive before swapping the dedicated bind directory."""
+        import posixpath
+        import uuid
+
+        if posixpath.dirname(archive) != self.spec.backups_dir:
+            raise DeployError("Restore archive must be inside this deployment's backups directory")
+        parent, basename = ("/volume", "data") if self.spec.data_volume else posixpath.split(self.spec.data_dir.rstrip("/"))
+        if not parent or not basename or basename in (".", ".."):
+            raise DeployError("Unsafe data mount path")
+        stage = ".sleight-restore-" + uuid.uuid4().hex
+        saved = ".sleight-before-restore-" + uuid.uuid4().hex
+        archive_in = f"/target/backups/{posixpath.basename(archive)}" if self.spec.data_volume else f"/backups/{posixpath.basename(archive)}"
+        script = f"""import tarfile, pathlib, os, shutil
+root = pathlib.Path('/target/{stage}')
+target = pathlib.Path('/target/{basename}')
+saved = pathlib.Path('/target/{saved}')
+root.mkdir()
+try:
+    with tarfile.open({archive_in!r}) as t:
+        members = t.getmembers()
+        if not all((m.name == 'data' or m.name.startswith('data/')) and
+                   '..' not in pathlib.PurePosixPath(m.name).parts and
+                   not m.isdev() and not m.islnk() for m in members):
+            raise ValueError('Unsafe backup archive')
+        # Chromium singleton symlinks are transient process locks; exclude them.
+        links = [m for m in members if m.issym()]
+        if any(pathlib.PurePosixPath(m.name).name not in
+               ('SingletonLock', 'SingletonSocket', 'SingletonCookie') for m in links):
+            raise ValueError('Unsupported symlink in backup')
+        t.extractall(root, members=[m for m in members if not m.issym()])
+    os.rename(target, saved)
+    try:
+        os.rename(root / 'data', target)
+    except BaseException:
+        os.rename(saved, target)
+        raise
+finally:
+    shutil.rmtree(root)
+"""
+        # Python's validation rejects links and path traversal before extracting anything.
+        mounts = ["-v", f"{self.spec.data_volume}:/target"] if self.spec.data_volume else ["-v", f"{parent}:/target", "-v", f"{self.spec.backups_dir}:/backups:ro"]
+        argv = ["docker", "run", "--rm", "--memory", "256m", "--pids-limit", "64",
+                "--entrypoint", "python", *mounts, self.spec.image, "-c", script]
+        self.mutate(argv, timeout=3600).check()
+        self.say(f"已恢复升级前 /data；当前目录保留为 {self.spec.data_volume or parent}/{saved}")
 
     def destroy(self, *, purge_data: bool = False, purge_image: bool = False) -> None:
         """停并删容器。
@@ -643,6 +776,10 @@ class Deployer:
         先按普通用户删（从没启动过 profile 的话它就是用户自己的），失败了再借一个
         root 容器 —— 浏览器用户目录是容器以 root 写的，普通用户 ``rm`` 删不掉。
         """
+        if self.spec.data_volume:
+            self.as_root("rm -rf /store/data && mkdir /store/data",
+                         mounts=[(self.spec.data_volume, "/store")]).check()
+            return
         plain = self.mutate(["rm", "-rf", self.spec.data_dir], sudo=self.sudo, check=False)
         if plain.ok:
             return
@@ -672,12 +809,17 @@ class Deployer:
         :param token: 不给就从目标机的 ``.env`` 里读
         :raises DeployError: 目标机上没有 ``AUTH_TOKEN``
         """
+        from ..lease import DatabaseLease
         from ..providers.cloakbrowser import CloakBrowserManager
+        from ..runtime.governor import shared_governor
 
+        governor = shared_governor(self.spec.resource_key, limit=self.spec.max_running)
         auth = token or self.existing_token()
         if not auth:
             raise DeployError(
                 f"no AUTH_TOKEN in {self.spec.env_path}; is anything deployed there?"
             )
         with self.runner.tunnel(self.spec.port) as port:
-            yield CloakBrowserManager(f"http://127.0.0.1:{port}", token=auth, name=self.spec.name)
+            yield CloakBrowserManager(f"http://127.0.0.1:{port}", token=auth, name=self.spec.name,
+                                      governor=governor, namespace=self.spec.resource_key,
+                                      lease=DatabaseLease())

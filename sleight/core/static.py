@@ -11,16 +11,16 @@
 - :class:`StaticElement`：一次快照、只读、不随后续 JS 变更、**不能交互**。查到目标后要操作，
   再用它的 CSS 路径回到实时 :meth:`Session.query`。
 
-默认零依赖：只用标准库 ``html.parser``，自带 CSS 子集 —— 类型 / ``#id`` / ``.class`` / ``*`` /
+默认解析器只用标准库 ``html.parser``，自带 CSS 子集 —— 类型 / ``#id`` / ``.class`` / ``*`` /
 ``[attr]`` ``[attr=v]`` ``[attr^=v]`` ``[attr$=v]`` ``[attr*=v]`` ``[attr~=v]`` / 复合
 （``div.a#b[x=y]``）/ 后代（空格）/ 子（``>``）/ 并集（``,``）。
 
 要 **XPath**（轴、位置谓词、``contains()`` 这些 CSS 子集表达不了的）就
-``pip install "sleight[xpath]"`` 并用 ``parse(xpath=True)``：改用 lxml 建**同一形状**的树，
+调用 ``parse(xpath=True)``：改用默认安装已包含的 lxml 建**同一形状**的树，
 CSS/text/attr 行为不变，多出一个 :meth:`StaticElement.xpath`。
 
 比 DrissionPage 的静态树多两点：``parse(pierce_shadow=True)`` 会把 open Shadow DOM 内容也
-内联进来一起查；不装 lxml 也能用（它的静态树必须有 lxml）。
+内联进来一起查；默认 CSS 后端只使用标准库。
 """
 
 from __future__ import annotations
@@ -131,8 +131,8 @@ class StaticElement:
     def xpath(self, expr: str) -> list[StaticElement | str]:
         """跑一条 XPath，**相对本元素**求值（原生 lxml 语义）。
 
-        需要 ``parse(xpath=True)`` 建的树（会用 lxml 解析），也就需要
-        ``pip install "sleight[xpath]"``。内建的 CSS 子集不用装任何东西，
+        需要 ``parse(xpath=True)`` 建的树（会用默认安装已包含的 lxml 解析）。
+        内建的 CSS 子集只使用标准库，
         但表达不了 xpath 的轴、位置谓词这些。
 
             rows = dom.xpath('//tr[td[contains(@class,"price")]]')   # 元素 → StaticElement
@@ -144,8 +144,7 @@ class StaticElement:
         """
         if self._lx is None:
             raise SleightError(
-                "this tree has no xpath support — build it with parse(xpath=True) "
-                '(needs pip install "sleight[xpath]")'
+                "this tree has no xpath support — build it with parse(xpath=True)"
             )
         index = self._root()._lx_index or {}
         out: list[StaticElement | str] = []
@@ -208,8 +207,8 @@ class _TreeBuilder(HTMLParser):
 def parse_html(html: str, *, xpath: bool = False) -> StaticElement:
     """把一段 HTML 解析成 :class:`StaticElement` 根（``#document``）。
 
-    :param xpath: 用 lxml 建树，让每个节点都能跑 :meth:`StaticElement.xpath`。需要
-        ``pip install "sleight[xpath]"``。默认 ``False`` —— 走标准库，零依赖
+    :param xpath: 用默认安装已包含的 lxml 建树，让每个节点都能跑
+        :meth:`StaticElement.xpath`。默认 ``False`` —— 走标准库
     """
     if xpath:
         return _parse_with_lxml(html)
@@ -229,7 +228,7 @@ def _parse_with_lxml(html: str) -> StaticElement:
         from lxml import html as lxml_html
     except ModuleNotFoundError as exc:      # pragma: no cover - 取决于装没装
         raise SleightError(
-            'xpath support needs lxml — pip install "sleight[xpath]"'
+            "lxml is missing from this installation; repair it with: pip install sleight"
         ) from exc
 
     lx_root = lxml_html.fromstring(html) if html.strip() else lxml_html.fromstring("<html></html>")

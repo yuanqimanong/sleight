@@ -1,6 +1,6 @@
-"""四工具 Gateway：给 LLM / MCP 的稳定、类型化、结果结构化的浏览器操作面。
+"""五工具 Gateway：给 LLM / MCP 的稳定、类型化、结果结构化的浏览器操作面。
 
-四个工具（对齐方案里的 Session / Observe / Act / Extract）+ 一个 ``find``：
+五个工具（Session / Observe / Act / Extract / Fetch），``find`` 归入 Observe：
 
 - **session**：导航与生命周期（open / reload / back / forward / info）。
 - **observe**：``snapshot``（把页面压成 LLM 可读文本 + 可交互元素 Ref）与 ``find``
@@ -8,6 +8,7 @@
 - **act**：click / type / press / scroll / hover —— **既收 Ref 也收坐标**（坐标是留给
   Canvas/图标类 UI 的逃生舱，ref-only 会在那类界面上硬失败）。
 - **extract**：正文与常用字段。
+- **fetch**：复用浏览器状态读取 GET/HEAD 响应，不导航，响应最多 256 KiB。
 
 设计取舍（来自对既有实现的调研）：
 
@@ -24,7 +25,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..core.errors import SleightError
@@ -60,7 +61,7 @@ class ToolResult:
 
 
 class Gateway:
-    """把一个 :class:`~sleight.core.session.Session` 包成给 LLM/MCP 的四工具面。
+    """把一个 :class:`~sleight.core.session.Session` 包成给 LLM/MCP 的五工具面。
 
     :param session: 已连上的 Session
     :param max_batch: 预留的批量上限（服务端强制，模型改不了）
@@ -80,6 +81,7 @@ class Gateway:
     def session(
         self, action: str, *, url: str | None = None,
         wait_text: str | None = None, wait_selector: str | None = None, timeout: float = 30.0,
+        referrer: str | None = None,
     ) -> ToolResult:
         """导航与生命周期。action ∈ ``open`` / ``reload`` / ``back`` / ``forward`` / ``info``。"""
         if action not in _SESSION_ACTIONS:
@@ -89,7 +91,8 @@ class Gateway:
             if action == "open":
                 if not url:
                     return ToolResult.fail("session", action, "open needs a url")
-                self._s.open(url, wait=wait, timeout=timeout)
+                source = {"referrer": referrer} if referrer is not None else {}
+                self._s.open(url, wait=wait, timeout=timeout, **source)
             elif action == "reload":
                 self._s.reload(wait=wait, timeout=timeout)
             elif action == "back":
@@ -99,8 +102,22 @@ class Gateway:
             self._snapshot = None            # 页面变了，旧快照作废
             return ToolResult(True, "session", action,
                               {"url": self._s.url(), "title": self._s.title()})
-        except SleightError as exc:
+        except (SleightError, ValueError) as exc:
             return ToolResult.fail("session", action, str(exc))
+
+    def fetch(self, url: str, *, method: str = "GET", timeout: float = 30,
+              max_bytes: int = 256 * 1024) -> ToolResult:
+        """读取浏览器请求响应；MCP 限 GET/HEAD 和 256 KiB，不改变当前页面。"""
+        try:
+            if method not in {"GET", "HEAD"}:
+                raise ValueError("browser_fetch supports GET and HEAD")
+            if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+                raise ValueError("max_bytes must be a positive integer")
+            response = self._s.fetch(url, method=method, timeout=timeout,
+                                    max_bytes=min(max_bytes, 256 * 1024))
+            return ToolResult(True, "fetch", method, {**asdict(response), "http_ok": response.ok})
+        except (SleightError, ValueError, TypeError) as exc:
+            return ToolResult.fail("fetch", str(method), str(exc))
 
     # ------------------------------------------------------------------ #
     # Observe 工具
@@ -210,6 +227,7 @@ class Gateway:
             "observe": list(_OBSERVE_ACTIONS),
             "act": list(_ACT_ACTIONS),
             "extract": ["document"],
+            "fetch": ["GET", "HEAD"],
         }
 
     # ------------------------------------------------------------------ #

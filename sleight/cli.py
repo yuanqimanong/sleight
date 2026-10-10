@@ -4,7 +4,7 @@
 一台机器上装了 sleight 和 docker 就能 ``sleight deploy``；控制机装 sleight、目标机只要
 有 docker 和 sshd，就能 ``sleight deploy --ssh deploy@host``。
 
-只用标准库（argparse）。``sleight ui`` 那个 Web 界面需要 ``pip install "sleight[ui]"``。
+使用 argparse，启动时读取当前目录的 .env。Web 依赖已包含在默认安装中。
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .core.errors import SleightError
@@ -52,7 +53,12 @@ EXIT_SIGPIPE = 141        # 128 + SIGPIPE，管道被下游关掉时的惯例
 
 
 def _out(text: str = "") -> None:
-    print(text, flush=True)
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        # Windows CP936 consoles cannot encode every status symbol.
+        safe = text.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
+        print(safe, flush=True)
 
 
 def _err(text: str) -> None:
@@ -108,6 +114,12 @@ _SPEC_FLAGS = {
     "port": "port",
     "bind": "bind_ip",
     "shm_size": "shm_size",
+    "mem_limit": "mem_limit",
+    "cpus": "cpus",
+    "pids_limit": "pids_limit",
+    "max_running": "max_running",
+    "resource_key": "resource_key",
+    "data_volume": "data_volume",
     "project": "name",
     "container": "container_name",
     "expose": "expose",
@@ -337,7 +349,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_logs(args: argparse.Namespace) -> int:
     dep = _deployer(args)
     if args.follow:
-        argv = dep.compose_argv("logs", "-f", "--tail", str(args.tail), "manager")
+        argv = dep.compose_argv("logs", "-f", "--tail", str(args.tail), dep.spec.service_name)
         return dep.runner.stream(argv, cwd=dep.spec.dir)
     _out(dep.logs(tail=args.tail))
     return EXIT_OK
@@ -884,7 +896,13 @@ def _spec_parser() -> argparse.ArgumentParser:
     g.add_argument("--bind", metavar="IP", help="宿主机监听地址（默认 127.0.0.1）")
     g.add_argument("--expose", action="store_true", default=None,
                    help="确认要监听非回环地址。token 在 HTTP 上是明文，务必有防火墙/VPN/TLS")
-    g.add_argument("--shm-size", metavar="SIZE", help="/dev/shm 大小，整个容器共享（默认 5gb）")
+    g.add_argument("--shm-size", metavar="SIZE", help="/dev/shm 大小，整个容器共享（默认 1gb）")
+    g.add_argument("--mem-limit", metavar="SIZE", help="容器内存硬上限（默认 4gb）")
+    g.add_argument("--cpus", type=float, help="CPU 上限（默认 2）")
+    g.add_argument("--pids-limit", type=int, help="进程数上限（默认 512）")
+    g.add_argument("--max-running", type=int, help="共享浏览器并发上限（默认 3）")
+    g.add_argument("--resource-key", help="fin / Sleight 共用的资源标识")
+    g.add_argument("--data-volume", help="Docker 数据卷名；留空使用 bind mount")
     g.add_argument("--project", metavar="NAME", help="compose 项目名（默认 cloakbrowser）")
     g.add_argument("--container", metavar="NAME", help="容器名（默认 cloakbrowser-manager）")
     g.add_argument("--allow-latest", action="store_true", default=None,
@@ -964,7 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_tunnel)
 
     # —— 主机清单 ——
-    p = add("hosts", "管理 ~/.sleight/hosts.toml")
+    p = add("hosts", "管理主机清单（统一数据库）")
     hsub = p.add_subparsers(dest="hosts_command", metavar="<子命令>")
     hp = hsub.add_parser("ls", help="列出配好的主机")
     hp.set_defaults(func=cmd_hosts_ls)
@@ -1085,13 +1103,27 @@ def build_parser() -> argparse.ArgumentParser:
     bp.set_defaults(func=cmd_browser_rm)
     p.set_defaults(func=lambda a: (_err("用 sleight browser ls|install|path|rm"), EXIT_USAGE)[1])
 
+    p = add("db", "导出或导入统一数据库（迁移前停止服务并排空会话）")
+    dbsub = p.add_subparsers(dest="db_command")
+    for operation in ("export", "import"):
+        dbp = dbsub.add_parser(operation)
+        dbp.add_argument("path")
+        def run_db(args):
+            import json
+
+            from .service.backup import export_data, import_data
+            result = export_data(args.path) if args.db_command == "export" else import_data(args.path)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        dbp.set_defaults(func=run_db)
+
     # —— 界面 ——
-    p = add("ui", "启动 Web 界面（需要 pip install \"sleight[ui]\"）")
+    p = add("ui", "启动 Web 界面（默认安装可用）")
     p.add_argument("--bind", dest="bind_ui", default="127.0.0.1", metavar="IP",
                    help="监听地址。默认只听本机 —— 这个界面能执行 ssh 和 docker")
     p.add_argument("--port", dest="ui_port", type=int, default=8700, metavar="N")
     p.add_argument("--token", dest="ui_token", metavar="TOKEN",
-                   help="访问口令。绑到非回环地址时**必须**给")
+                   help="管理员引导口令；首次启动也可自动生成一次")
     p.set_defaults(func=cmd_ui)
 
     return parser
@@ -1107,6 +1139,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     :returns: 退出码 —— 0 成功、1 失败、2 用法错、3 体检没过、130 Ctrl-C、
         141 输出管道被下游关掉（``| head`` 之类）
     """
+    from dotenv import load_dotenv
+
+    load_dotenv(Path.cwd() / ".env", override=False)
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is None:

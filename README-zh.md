@@ -3,18 +3,39 @@
 **像人一样驱动任何 CDP 浏览器。** 带真实手抖的贝塞尔轨迹、按击键动力学研究建模的打字节奏，
 以及浏览器实例池的排他租用。
 
-Python ≥ 3.11 · 唯一运行依赖（`websocket-client`）· MIT
+Python ≥ 3.11 · 默认包含 XPath 与 Web 界面 · MIT
 
 **[English README](README.md)** · 📖 **[Wiki — 完整中文文档](https://github.com/yuanqimanong/sleight/wiki)**
 
 ```bash
-pip install sleight                     # 核心：一个依赖
-pip install "sleight[xpath]"            # + lxml，解锁 parse(xpath=True)
-pip install "sleight[ui]"               # + fastapi/uvicorn，解锁 sleight ui
-pip install "sleight[redis]"            # + redis，跨进程租约
+pip install sleight                     # 默认包含 XPath 和 sleight ui
 
 sleight browser install fingerprint-chromium   # 可选：装一个反检测内核
 ```
+
+## 统一浏览器服务
+
+```bash
+sleight ui --bind 127.0.0.1 --port 8700
+```
+
+首次启动显示一次管理员 token。Web 创建执行用户，配置默认环境及插件/代理模板，再签发执行 token。
+启动时自动读取当前工作目录的 `.env`，系统环境变量优先。参考 [.env.example](.env.example)，填写 `SLEIGHT_UI_TOKEN` 可使用固定管理员登录 token。
+默认 SQLite；设置 `SLEIGHT_DATABASE_URL=postgresql://...` 可使用 PostgreSQL，配置与运行账本使用相同模型。
+部署只运行 Python，Vue 页面已打包，不需要 Node 或 Redis。
+
+```python
+from sleight.client import ServiceClient
+
+with ServiceClient("http://sleight-host:8700", token="<执行用户 token>") as client:
+    profile = client.create_profile(name="任务", fingerprint_seed=12345)
+    with client.session(profile["id"], human=True) as session:
+        session.open("https://example.com")
+        print(session.title())
+```
+
+HTTP MCP 位于 `/mcp`。stdio 使用 `SLEIGHT_UPSTREAM`、`SLEIGHT_TOKEN` 启动 `sleight-mcp`。
+[部署、数据库迁移与回滚](docs/0.6部署与验收.md)。旧本机 CDP API 仍可使用。
 
 ## 30 秒
 
@@ -129,7 +150,7 @@ Ref 由 `(loaderId, backendNodeId)` 做键：同一个节点跨多次快照拿�
 每个 ref 立刻失效（`StaleRef`），而不是悄悄指向此刻占着那个位置的东西。子 frame 会被合并
 进来 —— 同进程 iframe 和跨源 OOPIF 都是 —— 所以 iframe 里的元素和别的元素一样有 ref。
 
-从渲染后的 DOM 里抽正文和常用字段 —— 不用 lxml，不用 Node：
+直接在浏览器里，从渲染后的 DOM 提取正文和常用字段：
 
 ```python
 doc = s.extract_document()
@@ -143,8 +164,23 @@ doc.title, doc.byline, doc.text[:80], doc.json_ld, doc.low_quality
 dom = s.parse()                                   # 一次抓取，之后纯 Python
 names = [e.text for e in dom.query_all("tr.row td.name")]
 deep  = s.parse(pierce_shadow=True)               # open Shadow DOM 也内联进来
-rows  = s.parse(xpath=True).xpath("//tr[3]/td")   # 需要 sleight[xpath]
+rows  = s.parse(xpath=True).xpath("//tr[3]/td")   # XPath 默认安装可用
 ```
+
+页面登录后，还可以直接读取接口，复用当前浏览器的 Cookie（包括 HttpOnly）、代理和连接：
+
+```python
+s.open("https://your-site.example/account", referrer="https://your-site.example/")
+response = s.fetch("/api/items")
+if response.ok:
+    items = response.json()
+```
+
+`fetch()` 不导航、不新建实例，远程 `ServiceClient` 会话使用同一 API。SDK 支持
+GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS；默认超时 30 秒、响应最多 1 MiB，超时或超限即取消读取。
+返回 UTF-8 文本；HTTP 4xx/5xx 保留真实状态，网络错误抛异常，不自动重试。
+仍受 CORS/CSP、SameSite 和浏览器请求头规则约束，不能替代所有页面渲染。
+`open(referrer=...)` 仅在显式提供来源时设置，跨站只发送来源域，HTTPS → HTTP 不发送来源。
 
 自己起一个本机浏览器 —— 任何 Chromium 构建，包括反检测内核。同一个种子，每次同一套指纹：
 
@@ -161,9 +197,10 @@ with launch("fingerprint-chromium", fingerprint=42) as s:
 SLEIGHT_CDP_URL=http://127.0.0.1:9222 sleight-mcp
 ```
 
-零额外依赖的 JSON-RPC over stdio，暴露四个工具 —— `browser_session` /
+零额外依赖的 JSON-RPC over stdio，暴露五个工具 —— `browser_session` /
 `browser_observe`（snapshot + find）/ `browser_act`（按 ref **或**按坐标，后者给 canvas
-和纯图标 UI 用）/ `browser_extract`。Raw CDP 和 `eval` 默认隐藏，要显式打开。
+和纯图标 UI 用）/ `browser_extract` / `browser_fetch`（GET/HEAD，最多 256 KiB）。
+Raw CDP 和 `eval` 默认隐藏，要显式打开。
 
 ## 有一队浏览器要驱动
 
@@ -181,7 +218,7 @@ sleight ui                                                # 同样的事，在�
 ```
 
 主机、每台机上的 manager，以及部署/备份/升级的审计流水，都存在本地 SQLite
-（`~/.sleight/sleight.db`），CLI 和 Web 界面共用。
+（启动目录下的 `data/control.db`），CLI 和 Web 界面共用。`SLEIGHT_HOME` 可覆盖数据目录。
 
 `sleight ui` 会一步步带你走：连接主机（保存前先做真实连接测试）、选规模模板、体检、部署。
 每个选项旁边都有一行小字说明"填错了会坏什么"和推荐值 —— 后端定义一次，CLI
@@ -190,7 +227,7 @@ sleight ui                                                # 同样的事，在�
 部署是幂等的，`--dry-run` 会打印它将写入的确切字节，而那些**不该做的事是被拒绝而不是被
 记录在文档里**：不许用 `latest` tag、不许 `down -v`、不许悄悄轮换正在用的 `AUTH_TOKEN`、
 不许在同一个 `/data` 上起第二个 manager。引擎只用标准库（SSH 就是系统的 `ssh`）；
-只有 `sleight ui` 需要 `pip install "sleight[ui]"`。
+`sleight ui` 及其依赖已包含在默认安装中。
 
 ## 为什么会有这个库
 
@@ -242,11 +279,11 @@ transport 一样顺。
 拟人鼠标/键盘/滚轮/**拖拽** · 元素截图 · 表单（`select_option`、`upload_file`）·
 用于换出口 IP 的独立**浏览器上下文** · 按 origin 的**站点数据清理** ·
 基于 Fetch domain 的**请求拦截** · `exit_ip()` · 结构化网络资源捕获 ·
-跨 provider 的实例发现 · 带 TTL 续租的协作式排他租用（内存，或 Redis 跨进程）·
+跨 provider 的实例发现 · 带 TTL 续租的协作式排他租用（内存，或数据库跨进程）·
 幂等恢复 · 通过本机 docker 或 SSH 部署运维 CloakBrowser Manager（含插件）。
 
 **也做**（面向 LLM 的那一层）：**iframe / OOPIF / Shadow DOM 穿透** ·
-带稳定 ref 的**无障碍快照** · 正文与元数据**抽取** · 四工具 **agent 网关**与 **MCP server** ·
+带稳定 ref 的**无障碍快照** · 正文与元数据**抽取** · 五工具 **agent 网关**与 **MCP server** ·
 启动本机浏览器 binary。
 
 **不做：** 调度与队列 · 指纹伪装（那是浏览器的职责 —— sleight 负责驱动它，见 `LocalLauncher`）·
@@ -275,3 +312,8 @@ transport 一样顺。
 ## 许可
 
 MIT
+
+
+## 0.6 deployment
+
+[三项目部署、兼容边界与完整回滚](docs/0.6部署与验收.md)。Web 管理原生浏览器和 Docker Manager，统一插件/代理模板，复用官方 VNC。服务统一管理 SQLite/PostgreSQL 配额、租约与回收，客户端通过用户 token 接入，Sleight 服务必须常驻。

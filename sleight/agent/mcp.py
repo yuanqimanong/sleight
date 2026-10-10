@@ -4,8 +4,8 @@ MCP（Model Context Protocol）就是 **JSON-RPC 2.0 over stdio**：客户端（
 IDE / 任意 MCP host）逐行发 JSON-RPC 请求，server 逐行回。这里**零依赖**手写协议（不引
 官方 mcp SDK），因此和本库其它部分一样只依赖标准库，也便于离线测试。
 
-暴露的工具就是 Gateway 的四工具面：``browser_session`` / ``browser_observe`` /
-``browser_act`` / ``browser_extract``。结果里带快照文本或结构化数据；工具级失败走
+暴露的工具就是 Gateway 的五工具面：``browser_session`` / ``browser_observe`` /
+``browser_act`` / ``browser_extract`` / ``browser_fetch``。结果里带快照文本或结构化数据；工具级失败走
 ``isError`` 而不是 JSON-RPC error（协议错误才用后者）。
 
 跑法：
@@ -48,6 +48,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "properties": {
                 "action": {"type": "string", "enum": ["open", "reload", "back", "forward", "info"]},
                 "url": {"type": "string"},
+                "referrer": {"type": "string", "description": "Optional explicit HTTP(S) navigation source."},
                 "wait_text": {"type": "string"},
                 "wait_selector": {"type": "string"},
                 "timeout": {"type": "number"},
@@ -88,6 +89,22 @@ TOOL_SPECS: list[dict[str, Any]] = [
                 "human": {"type": "boolean", "default": True},
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "browser_fetch",
+        "description": "Fetch text through the current page's browser, reusing cookies and proxy "
+                       "without navigation or a new instance. GET/HEAD only; CORS/CSP apply. "
+                       "Response limit is 256 KiB; HTTP failures remain responses; no retries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "enum": ["GET", "HEAD"], "default": "GET"},
+                "timeout": {"type": "number", "minimum": 0.1, "maximum": 120, "default": 30},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144, "default": 262144},
+            },
+            "required": ["url"],
         },
     },
     {
@@ -166,10 +183,11 @@ class MCPServer:
         gw = self._gw()
 
         if name == "browser_session":
+            source = {"referrer": args["referrer"]} if "referrer" in args else {}
             r = gw.session(
                 args.get("action", "info"), url=args.get("url"),
                 wait_text=args.get("wait_text"), wait_selector=args.get("wait_selector"),
-                timeout=args.get("timeout", 30.0),
+                timeout=args.get("timeout", 30.0), **source,
             )
         elif name == "browser_observe":
             r = gw.observe(
@@ -186,6 +204,9 @@ class MCPServer:
             )
         elif name == "browser_extract":
             r = gw.extract(min_length=args.get("min_length", 200))
+        elif name == "browser_fetch":
+            r = gw.fetch(args.get("url", ""), method=args.get("method", "GET"),
+                         timeout=args.get("timeout", 30), max_bytes=args.get("max_bytes", 262144))
         else:
             return {"content": [_text(f"unknown tool: {name}")], "isError": True}
 
@@ -300,6 +321,10 @@ def _gateway_from_env() -> Gateway:
 
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    if os.environ.get("SLEIGHT_UPSTREAM"):
+        from ..service.stdio import main as remote_main
+        remote_main()
+        return
     _check_env()                     # 配错就当场退出，别静默起一个永远连不上浏览器的 server
     MCPServer(_gateway_from_env).serve_stdio()
 

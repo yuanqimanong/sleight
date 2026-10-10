@@ -35,7 +35,9 @@ def test_mcp_drives_a_real_browser_end_to_end(live_session):
                           "params": {"protocolVersion": "2024-11-05"}})
     assert init["result"]["serverInfo"]["name"] == "sleight"
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-    assert len(tools) == 4
+    assert {tool["name"] for tool in tools} == {
+        "browser_session", "browser_observe", "browser_act", "browser_extract", "browser_fetch",
+    }
 
     with serve_pages({"p.html": _PAGE}) as d:
         assert not _call(server, "browser_session",

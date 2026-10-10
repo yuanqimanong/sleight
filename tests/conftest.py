@@ -697,3 +697,31 @@ def docker_ok(
 @pytest.fixture
 def runner() -> FakeRunner:
     return FakeRunner(replies=docker_ok())
+
+
+@pytest.fixture(params=["sqlite", "postgresql"])
+def service_db(request, tmp_path, monkeypatch):
+    from sleight.service.database import database
+    monkeypatch.setenv("SLEIGHT_HOME", str(tmp_path))
+    monkeypatch.delenv("SLEIGHT_DATABASE_URL", raising=False)
+    if request.param == "postgresql":
+        url = os.environ.get("SLEIGHT_TEST_DATABASE_URL")
+        if not url:
+            pytest.skip("requires disposable PostgreSQL SLEIGHT_TEST_DATABASE_URL")
+        # Each test uses an isolated schema on the disposable test database.
+        import uuid
+
+        from sqlalchemy import create_engine, text
+        schema = "test_" + uuid.uuid4().hex
+        engine = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1))
+        with engine.begin() as conn:
+            conn.execute(text(f"CREATE SCHEMA {schema}"))
+        separator = "&" if "?" in url else "?"
+        monkeypatch.setenv("SLEIGHT_DATABASE_URL", url + separator + "options=-csearch_path%3D" + schema)
+    value = database()
+    yield value
+    value.engine.dispose()
+    if request.param == "postgresql":
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+        engine.dispose()

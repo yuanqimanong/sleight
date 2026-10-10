@@ -1,95 +1,88 @@
-# Web 界面教程
+# Web 界面教程（0.6）
 
-这页解决：`sleight ui` 是什么、怎么起、每个页签能干什么、哪些事它做不了。
+默认 `pip install sleight` 已包含 XPath、Web 与数据库驱动。运行 `sleight ui` 即可提供页面、API 和 MCP。
+设置 `SLEIGHT_UI_TOKEN`，然后运行 `sleight ui --bind 127.0.0.1 --port 8700`。
+首次启动生成管理员 token。远程程序使用用户级执行 token；默认 SQLite，可用 `SLEIGHT_DATABASE_URL` 切换 PostgreSQL。
 
-**定位**：Web 界面是**运维台**——部署和管理 CloakBrowser Manager、profile、插件。
-它**不驱动浏览器做任务**（那是 Python API 和 MCP 的事）。
+## 工作台
 
-## 起界面
-
-```bash
-pip install "sleight[ui]"     # 需要 fastapi + uvicorn
-sleight ui                    # 默认 http://127.0.0.1:8700
-```
-
-参数：
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--bind IP` | `127.0.0.1` | 监听地址。**默认只听本机是有意的** —— 这个界面能执行 ssh 和 docker |
-| `--port N` | `8700` | 端口 |
-| `--token TOKEN` | 无 | 访问口令 |
-
-### 鉴权规则（重要）
-
-- 监听**回环地址且不给 `--token`** → 直接放行。任何本机进程都能调用全部接口。
-- 绑**非回环地址**（如 `0.0.0.0`）→ **必须**给 `--token`，否则拒绝启动。
-
-**已知风险，明说**：口令会出现在直达链接的 URL 查询串里，也会被写进浏览器 `localStorage`——
-因此会进浏览器历史和可能的访问日志。代码里没有缓解手段。**没有** HTTPS/TLS、**没有**
-用户/角色/会话、**没有** CSRF token、**没有**限流。
-
-> 结论：**不要把它暴露到公网**。要远程访问，用 `sleight tunnel` 开 SSH 隧道到本地。
-
-## 界面结构
-
-左边是**目标树**（主机 → 该主机上的部署），右边是 5 个页签：
-
-| 页签 | 能做什么 |
+| 页面 | 操作 |
 |---|---|
-| **概览** | 容器状态、健康、端口映射、Manager `/api/status`；取回 `AUTH_TOKEN`；查看操作流水 |
-| **部署** | 改部署参数并重新部署；体检（preflight）；部署前预览将写入的文件全文 |
-| **实例** | 列出 / 新建 / 删除 profile；launch / stop / stop-all |
-| **插件** | 推送插件、下发到 profile、验证浏览器是否真的加载了、检查漂移 |
-| **危险区** | 升级、回滚、停机备份、销毁 |
+| 浏览器实例 | 六张动态状态卡片；按内核分组；创建、编辑、启动、重启、预览、日志、删除 |
+| 部署环境 | 安装 fingerprint-chromium；检查和部署 Linux Docker Manager；导入 Compose、备份、升级、回滚 |
+| 插件与代理 | 配置模板卡片、搜索与弹窗编辑；独立 Manager 插件管理，按选择环境、安装、下发排列 |
+| 用户与运行 | 运行管理、用户与接入、系统设置；单层分组菜单，直接进入各项功能 |
 
-## 三步引导向导（从零到跑起一个 Manager）
+实例日志在卡片的「日志」按钮中查看，按时间、操作、内容逐行显示，最新在前。
+刷新按钮位于每页条数选择框右侧，同一行显示；默认每页 20 条，可切换 50、200 条。每个实例保留最近 200 条操作日志。
+筛选栏默认显示，支持关键词、操作类型和起止时间；对全部保留日志筛选后分页，可一键清除。
+安装、部署和插件操作的进度保留在环境/插件页面。
+Web、代码和 MCP 的实际实例统一统计，同一浏览器的多个固定别名只计一次。
+长期实例停止后保留 Cookie 和登录态。临时实例会话结束后删除数据；清理失败时仍计数并占用名额。
 
-第一次用点「新建」会进向导：
+卡片下方「编辑实例」可修改名称、备注、创建模板、插件与代理模板、指纹种子和内核支持的启动选项。
+先停止实例，再打开编辑；名称会检查重复。内核、环境和长期/临时类型不能修改。
+保存保留实例 ID、数据目录和 Cookie，启动配置下次启动生效。仅改名称/备注不会覆盖原代理或插件。
+共享固定实例的普通用户只能改自己的名称和备注；服务器插件路径只有管理员可修改。
 
-**① 连接目标机** —— 填 SSH 目标（或选本机）。点「测试连接」会真的去跑一遍：
-`uname -sm` → `docker version` → `docker compose version` → 读 `/proc/meminfo` → `id -un`。
-**连接测试通过之前不会保存任何东西**，避免把一个连不上的主机存进库。
+「运行管理」包含运行会话、操作记录。「用户与接入」包含用户与权限、访问 token、创建模板。
+「系统设置」包含阈值告警、数据库。实例的创建、启动、编辑、网址和登录态统一在「浏览器实例」管理；此页不重复实例卡片。
+会话、用户、token 和操作记录采用可搜索、可筛选的表格，先筛选再分页，默认每页 20 条，可选 50、200 条。
+新增和编辑用户、签发 token 使用弹窗；token 明文仅显示一次，保存后点击「已保存，隐藏 token」。
+普通用户可管理自己的运行会话、token 和操作记录；用户与权限、创建模板及系统设置仅管理员可见。
 
-**② 选规模** —— 四个模板卡片：`trial` / `standard` / `large` / `private-net`。
-选完可以逐项改参数，每个输入框旁边有一行小字说明"填错了会坏什么"和推荐值
-（这份说明后端定义一次，CLI 的 `sleight templates` 和界面共用同一份）。
+「插件与代理 → 配置模板」先显示模板列表，支持搜索名称、代理或插件目录。
+点击「新建模板」或卡片中的「编辑模板」打开表单，编辑时默认保留原代理凭据。
+「Manager 插件管理」按选择环境、安装解包目录、查看并下发排列。安装结束后更新插件列表；下发前确认影响范围。
 
-**③ 体检并创建** —— 先跑 preflight（磁盘、内存、端口占用、docker 版本…），
-再展示**将要写入的文件全文**，确认后才真正部署。
+## 原生浏览器
 
-## 长任务的进度
+系统 Chrome / Edge 自动发现，可直接创建「本机原生」实例，无需另外安装内核。
+指定其他 Chromium 可执行文件时先检查内核。fingerprint-chromium 可在部署环境下载安装。
+指纹种子仅在支持的内核显示。普通 Chrome 137 起限制自动加载插件；Edge 也有限制，
+有界面启动后可在 chrome://extensions / edge://extensions 开启开发者模式手动加载，受本机策略约束。
+已安装的 Chrome for Testing / Chromium 支持自动加载，可按本机原生使用；没有专用下载入口。
+原生认证代理暂不支持，使用 Cloak 或本机转发。
 
-拉镜像可能几分钟。这类动作走 job + SSE：前端订阅 `/api/jobs/{id}/events`，
-实时把输出一行行推到日志面板，结束时收到 `done` 事件。
+点击「查看实例」可看到每 2.5 秒刷新的截图、横向标签页 ID/title，以及网址输入框。
+支持当前页面、新标签页、新窗口打开；切换标签页或短暂截图失败不会关闭面板。
+关闭面板或将控制台切到后台时暂停截图，控制台自身启动的会话在页面切换时继续续期。
+不同操作系统运行独立的 Sleight UI，主控制台添加地址和执行端口令后可内嵌访问。
 
-## REST 端点
+## Docker Manager
 
-界面就是这套 API 的一个前端，你也可以直接调（记得带鉴权头）：
+新建部署按「检测 Docker → 选择版本与资源 → 检查并部署」操作。
+目录、项目、容器和卷名称自动生成；远端 SSH 和手动镜像在高级选项。
+官方 Docker Hub 版本列表显示架构、更新时间、已验证版本，并在可用时固定 digest；离线可使用缓存或手填。
+先点击检查，检查通过后才允许部署；修改参数后必须重新检查。
+Windows Docker Desktop 默认命名卷，免共享 Windows 目录。Linux 推荐独立 bind mount。
+已有部署先导入 Compose；保留网络、外置插件挂载、自定义环境变量和 token。
+升级先停机备份；回滚恢复旧镜像、Compose、env 和完整 /data，并保存当前数据。外置插件文件另行备份。
 
-| 分组 | 端点 |
-|---|---|
-| 配置 | `GET /api/defaults`（前端启动时拉的唯一配置源：版本、默认镜像、spec 缺省、模板、地区、字段说明）|
-| 探活 | `POST /api/probe` |
-| 主机/部署 | `GET|POST /api/hosts`、`DELETE /api/hosts/{name}`、`GET|POST /api/deployments`、`DELETE /api/deployments/{host}/{name}` |
-| 流水 | `GET /api/events?host=&limit=50` |
-| 运维 | `POST /api/hosts/{name}/preflight|deploy|upgrade|rollback|destroy|backup`、`GET .../status|logs|token`（都支持 `?deployment=<名>`）|
-| 实例 | `GET|POST /api/hosts/{name}/profiles`、`DELETE .../profiles/{pid}?confirm=`、`POST .../profiles/{pid}/{action}` |
-| 任务 | `GET /api/jobs`、`GET /api/jobs/{id}`、`GET /api/jobs/{id}/events`（SSE）|
+新镜像 Profile API 与旧版有字段差异，SDK 自动转换支持的字段；精确 GPU renderer、非 Windows persona 等不兼容设置会明确报错。
+默认提供 Win-US-00、01、02 三份无代理模板。自定义模板在「用户与运行 → 创建模板」配置。
+现代 Manager 的 GPU 家族无法完全复现旧型号：NVIDIA 转为 nvidia，旧 AMD 转为 auto；模板说明明确标注。
+Manager 0.1.x 在容器显示服务中运行有界面浏览器，不支持按实例设置 headless=True；表单根据实际版本隐藏该选项。
+官方 Manager 自带 dashboard / KasmVNC，从实例预览中的「官方 Manager 监控」入口打开。
 
-## Web 端做不到、只能用 CLI 的事
+## 告警与数据库
 
-这是实话实说的清单：
+CPU/内存卡片的设置入口跳到「阈值告警」。默认 CPU 85%、内存 80%、持续 60 秒、采样 5 秒、重复通知 15 分钟。
+可监控 Sleight 主机或指定 Manager 容器；容器 CPU/内存按配置限额计算，不将本机指标冒充远端指标。
+Webhook 未配置时不发送通知，恢复后发恢复通知。Webhook 与签名密钥加密保存。
 
-| 做不到的事 | 用什么替代 |
-|---|---|
-| 删除插件 | `sleight ext rm` |
-| SSH 隧道 | `sleight tunnel` |
-| 装浏览器内核 | `sleight browser install`（纯本机命令，界面没有暴露）|
-| 新建实例时填**指纹种子**和备注 | `sleight profiles create --seed N --notes TEXT`（后端 API 其实接受，只是表单没做输入框）|
-| 部署参数里的 `project` / `allow_latest` / `nofile` / `restart` / 日志轮转 | CLI 有 `--project`、`--allow-latest`；其余两边都没有 |
-| 独立的「流水 / 任务」页签 | 概览页点「操作流水」按钮；`GET /api/jobs` 存在但前端没用 |
-| 改 uvicorn 的 reload/workers/日志级别 | 没有参数，日志级别固定 `info` |
+默认数据库在启动目录的 data/control.db；使用 SLEIGHT_HOME 覆盖时保持固定启动目录。
+「数据库」页面支持 PostgreSQL 连接测试和空目标迁移，SQLite/PG 共用表结构。
+停止全部会话、浏览器、后台任务并完成回收后才能迁移。迁移先备份，成功后暂停写入，下次启动生效。
+连接引导配置保存在 data/storage.json，密钥为 secret.key；原数据库保留，回滚方法在页面中说明。
 
----
-下一步 → [[CLI-参考]] · [[远程部署]]
+## 鉴权与边界
+
+UI 使用 HttpOnly cookie、Origin 校验及登录限流。口令不进入 URL 或 localStorage；服务调用使用 X-Sleight-Token。
+管理员可以执行 Docker、SSH 和浏览器操作，应只部署在受控内网或 TLS 入口后。
+pyp 的「内部系统 → Sleight」用管理员鉴权反代，不把服务口令发给浏览器。
+
+fin 使用服务地址和用户 execute token；pyp 使用服务地址和管理员 delegate token。无需 Redis。
+UI 常驻，数据库统一协调额度并持续回收过期会话；清理成功前不释放容量。
+
+完整升级、验收与回滚见仓库 docs/0.6部署与验收.md。

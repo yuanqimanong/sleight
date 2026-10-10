@@ -15,8 +15,8 @@ from typing import Any
 
 __all__ = ["DEFAULT_IMAGE", "DeploySpec", "generate_token", "split_image"]
 
-#: 手册附录 A.9 的版本基线。生产上应显式钉更具体的标签或摘要。
-DEFAULT_IMAGE = "cloakhq/cloakbrowser-manager:v0.0.10"
+#: 官方正式发布版本。保持固定 tag，避免浮动 latest 自动改变部署。
+DEFAULT_IMAGE = "cloakhq/cloakbrowser-manager:v0.1.6"
 
 #: Manager 在容器里监听的端口。它不可配 —— 是镜像写死的。
 CONTAINER_PORT = 8080
@@ -79,7 +79,18 @@ class DeploySpec:
     bind_ip: str = "127.0.0.1"
     port: int = 9000
     # 资源
-    shm_size: str = "5gb"
+    shm_size: str = "1gb"
+    mem_limit: str = "4gb"
+    cpus: float = 2.0
+    pids_limit: int = 512
+    max_running: int = 3
+    resource_key: str = "cloakbrowser"
+    auto_update: bool = False
+    compose_filename: str = "docker-compose.yaml"
+    service_name: str = "manager"
+    data_path: str = ""
+    extensions_path: str = ""
+    data_volume: str = ""
     nofile: int = 65535
     stop_grace_period: str = "45s"
     restart: str = "unless-stopped"
@@ -96,7 +107,7 @@ class DeploySpec:
 
     @property
     def compose_path(self) -> str:
-        return f"{self.dir}/docker-compose.yaml"
+        return f"{self.dir}/{self.compose_filename}"
 
     @property
     def env_path(self) -> str:
@@ -109,7 +120,7 @@ class DeploySpec:
 
     @property
     def data_dir(self) -> str:
-        return f"{self.dir}/data"
+        return self.data_path or f"{self.dir}/data"
 
     @property
     def backups_dir(self) -> str:
@@ -118,7 +129,7 @@ class DeploySpec:
     @property
     def extensions_dir(self) -> str:
         """插件目录的**宿主机**路径。"""
-        return f"{self.data_dir}/extensions"
+        return self.extensions_path or f"{self.data_dir}/extensions"
 
     @property
     def container_extensions_dir(self) -> str:
@@ -193,12 +204,22 @@ class DeploySpec:
                 f"dir={self.dir!r} 用了 ~，这里不会展开它 —— 部署目录是**目标机上**的路径，"
                 "而展开 ~ 需要先连上去问。写全，比如 /home/你的用户名/cloakbrowser-manager"
             )
-        elif not self.dir.startswith("/"):
+        elif not self.dir.startswith("/") and not re.match(r"^[A-Za-z]:/", self.dir):
             problems.append(f"dir={self.dir!r} must be an absolute path on the target host")
         if any(c in self.dir for c in "\n\r\t\0"):
             problems.append("dir contains a control character")
         if self.dir.rstrip("/") in ("", "/"):
             problems.append("dir must not be the filesystem root")
+        if self.compose_filename not in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"):
+            problems.append("compose_filename must be a standard Compose filename")
+        if not _PROJECT_RE.fullmatch(self.service_name):
+            problems.append("service_name must be a Compose service identifier")
+        if self.data_path and (not self.data_path.startswith("/") and not re.match(r"^[A-Za-z]:/", self.data_path)):
+            problems.append("data_path must be an absolute bind mount path")
+        if self.data_volume and not _PROJECT_RE.fullmatch(self.data_volume):
+            problems.append("data_volume must be a lowercase Docker volume name")
+        if self.data_volume and (self.data_path or self.extensions_path):
+            problems.append("data_volume cannot be combined with host bind mount paths")
 
         repo, tag, digest = split_image(self.image)
         if not repo:
@@ -229,6 +250,12 @@ class DeploySpec:
         if not 1 <= self.port <= 65535:
             problems.append(f"port={self.port} is out of range")
 
+        if not _SIZE_RE.match(self.mem_limit):
+            problems.append("mem_limit must be a Docker memory size")
+        if self.cpus <= 0 or self.pids_limit < 32 or self.max_running < 1:
+            problems.append("cpus, pids_limit and max_running must have usable positive values")
+        if not _PROJECT_RE.match(self.resource_key):
+            problems.append("resource_key must be a stable lowercase deployment identifier")
         if not _SIZE_RE.match(self.shm_size):
             problems.append(f"shm_size={self.shm_size!r} is not a docker size (e.g. '5gb', '512m')")
         if not _SIZE_RE.match(self.log_max_size):

@@ -68,7 +68,7 @@ sleight deployments rm hk-01 second
 
 sleight history --host hk-01            # 部署/备份/升级/销毁流水
 ```
-存在 `~/.sleight/sleight.db`，CLI 与 Web 界面共用。
+存在启动目录的 `data/control.db`，CLI 与 Web 界面共用；`SLEIGHT_HOME` 可覆盖目录。
 
 ## 插件
 
@@ -105,7 +105,7 @@ sleight profiles stop <id> --host hk-01
 ```bash
 sleight ui [--bind 127.0.0.1] [--port 8700] [--token TOKEN]
 ```
-需要 `pip install "sleight[ui]"`。详见 [[Web界面教程]]。
+默认安装即可使用。详见 [[Web界面教程]]。
 
 ## MCP
 

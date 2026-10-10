@@ -10,6 +10,7 @@ compose 还是 v1、内存不够三个 profile、两个 Manager 挂同一个 ``/
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -209,6 +210,16 @@ def preflight(spec: DeploySpec, runner: Runner, *, sudo: bool = False) -> list[C
 
 def _existing_ancestor(path: str, runner: Runner) -> str:
     """往上找到第一个真实存在的祖先目录 —— 权限和空间要在那上面量。"""
+    import os
+    from pathlib import Path
+
+    from .runner import LocalRunner
+
+    if isinstance(runner, LocalRunner) and os.name == "nt":
+        directory = Path(path)
+        while not directory.exists() and directory.parent != directory:
+            directory = directory.parent
+        return str(directory)
     current = path.rstrip("/")
     while current and current != "/":
         if runner.run(["test", "-d", current]).ok:
@@ -240,13 +251,25 @@ def _check_dir(spec: DeploySpec, runner: Runner, *, sudo: bool) -> Check:
 
 
 def _check_port(spec: DeploySpec, runner: Runner) -> Check:
-    listing = runner.run(["ss", "-ltn"])
-    if not listing.ok:
-        listing = runner.run(["netstat", "-ltn"])
-    if not listing.ok:
-        return Check("port", CheckLevel.WARN, f"cannot inspect listening ports for {spec.port}",
-                     hint="neither ss nor netstat is available; docker will report the conflict")
-    if spec.port not in parse_listening_ports(listing.out):
+    import os
+
+    from .runner import LocalRunner
+
+    if isinstance(runner, LocalRunner) and os.name == "nt":
+        import psutil
+        try:
+            ports = {c.laddr.port for c in psutil.net_connections(kind="tcp") if c.status == psutil.CONN_LISTEN}
+        except psutil.Error:
+            return Check("port", CheckLevel.WARN, f"cannot inspect listening ports for {spec.port}")
+    else:
+        listing = runner.run(["ss", "-ltn"])
+        if not listing.ok:
+            listing = runner.run(["netstat", "-ltn"])
+        if not listing.ok:
+            return Check("port", CheckLevel.WARN, f"cannot inspect listening ports for {spec.port}",
+                         hint="neither ss nor netstat is available; docker will report the conflict")
+        ports = parse_listening_ports(listing.out)
+    if spec.port not in ports:
         return Check("port", CheckLevel.OK, f"{spec.bind_ip}:{spec.port} is free")
 
     mine = runner.run(["docker", "ps", "--filter", f"name=^{spec.container_name}$",
@@ -268,7 +291,23 @@ def _check_data_conflict(spec: DeploySpec, runner: Runner) -> Check:
     for name, mounts in parse_ps_mounts(listing.out).items():
         if name == spec.container_name:
             continue
-        if spec.data_dir in mounts or spec.dir in mounts:
+        actual = runner.run(["docker", "inspect", name, "--format", "{{json .Mounts}}"])
+        if actual.ok:
+            import json
+
+            with suppress(ValueError, TypeError, KeyError):
+                mounts = {m["Source"] for m in json.loads(actual.out) if m.get("Destination") == "/data"}
+            if spec.data_volume:
+                with suppress(ValueError, TypeError, KeyError):
+                    mounts |= {m.get("Name", "") for m in json.loads(actual.out) if m.get("Destination") == "/data"}
+        def canonical(path):
+            path = path.replace("\\", "/").rstrip("/")
+            desktop = re.match(r"^/(?:run/desktop/mnt/host|host_mnt)/([a-zA-Z])/(.*)", path)
+            if desktop:
+                path = f"{desktop[1]}:/{desktop[2]}"
+            return path.lower() if re.match(r"^[A-Za-z]:/", path) else path
+        mounts = {canonical(m) for m in mounts}
+        if canonical(spec.data_dir) in mounts or canonical(spec.dir) in mounts or (spec.data_volume and spec.data_volume in mounts):
             return Check(
                 "data", CheckLevel.FAIL,
                 f"container {name!r} already mounts {spec.data_dir}",
@@ -283,6 +322,10 @@ def _check_data_conflict(spec: DeploySpec, runner: Runner) -> Check:
 def _check_memory(runner: Runner) -> Check:
     meminfo = runner.run(["cat", "/proc/meminfo"])
     total = parse_mem_total_kb(meminfo.out) if meminfo.ok else None
+    engine = runner.run(["docker", "info", "--format", "{{.MemTotal}}"])
+    if engine.ok and engine.text.isdigit():
+        engine_total = int(engine.text) // 1024
+        total = min(total, engine_total) if total else engine_total
     if total is None:
         return Check("memory", CheckLevel.WARN, "cannot read /proc/meminfo")
     gb = total / 1024 / 1024

@@ -203,6 +203,10 @@ class LocalRunner(_BaseRunner):
         check: bool = False,
     ) -> CommandResult:
         full = (*self._sudo, *argv) if sudo else tuple(argv)
+        if os.name == "nt" and not sudo:
+            native = self._windows_probe(tuple(argv))
+            if native is not None:
+                return native.check() if check else native
         log.debug("local: %s", describe(full))
         try:
             proc = subprocess.run(                       # argv 数组，不经过 shell
@@ -219,6 +223,34 @@ class LocalRunner(_BaseRunner):
         else:
             result = CommandResult(full, proc.returncode, _decode(proc.stdout), _decode(proc.stderr))
         return result.check() if check else result
+
+    def _windows_probe(self, argv: tuple[str, ...]) -> CommandResult | None:
+        """Known filesystem/probe commands use native APIs on Docker Desktop hosts."""
+        import platform
+
+        code, out = 0, ""
+        if argv[0] == "uname":
+            out = f"Windows {platform.machine()}"
+        elif argv[:2] == ("test", "-d"):
+            code = 0 if Path(argv[-1]).is_dir() else 1
+        elif argv[:2] == ("test", "-e"):
+            code = 0 if Path(argv[-1]).exists() else 1
+        elif argv[:2] == ("test", "-w"):
+            code = 0 if os.access(argv[-1], os.W_OK) else 1
+        elif argv[:2] == ("mkdir", "-p"):
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+        elif argv[:2] == ("cat", "/proc/meminfo"):
+            import psutil
+
+            out = f"MemTotal: {psutil.virtual_memory().total // 1024} kB"
+        elif argv[:2] == ("df", "-Pk"):
+            usage = shutil.disk_usage(argv[-1])
+            out = f"Filesystem 1024-blocks Used Available Capacity Mounted\nlocal {usage.total//1024} {usage.used//1024} {usage.free//1024} 0% {argv[-1]}"
+        elif argv[0] == "id":
+            return CommandResult(argv, 1, "", "POSIX ownership is unavailable on Windows")
+        else:
+            return None
+        return CommandResult(argv, code, out, "")
 
     def stream(self, argv: Sequence[str], *, cwd: str | None = None) -> int:
         return subprocess.call(list(argv), cwd=cwd)   # argv 数组，不经过 shell

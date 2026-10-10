@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+/data/
 
 # 虚拟环境
 .venv/
@@ -30,3 +31,11 @@ htmlcov/
 
 # scripts/plot_path.py 的输出
 *.png
+.pytest-*/
+.package-probe-*/
+.browser-test-home/
+.ui-test-home/
+.deploy-live/
+.deploy-volume-live/
+.vnc-debug.js
+frontend/node_modules/

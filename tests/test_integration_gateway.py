@@ -1,4 +1,4 @@
-"""真浏览器下的四工具 Gateway：observe → find → act(ref/坐标) → extract 全链路。
+"""真浏览器下的 Gateway：observe → find → act(ref/坐标) → extract 全链路。
 
 结构化结果、Ref 解析、按 Ref 点击产生的真事件都得在真 Chromium 上验证。无浏览器时 skip。
 """

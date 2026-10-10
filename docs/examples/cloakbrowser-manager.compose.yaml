@@ -1,0 +1,140 @@
+# Linux Docker Engine 部署样例。
+# 复制到线上原部署目录并保存为 docker-compose.yaml，沿用原 .env 和 ./data。
+# 升级前暂停浏览器任务、停止 Manager，并备份旧 Compose、.env 和完整 ./data。
+# 3 GiB 阈值使用 Docker stats 的 Linux 口径：扣除可回收文件缓存，不包含 swap。
+# watchdog 持有 Docker socket 的管理权限；仅用于可信、受控的部署环境。
+name: cloakbrowser
+
+services:
+  manager:
+    image: cloakhq/cloakbrowser-manager:v0.1.6@sha256:6c8f1c6bf53bb82f09f7d8b9cde30fb8b80a10fc32d15889ff2a1c7143156f01
+    container_name: cloakbrowser-manager
+    restart: unless-stopped
+    init: true
+
+    networks:
+      - default
+      - cloak-net
+
+    ports:
+      - "${MANAGER_BIND_IP:-127.0.0.1}:${MANAGER_PORT:-9000}:8080"
+
+    environment:
+      AUTH_TOKEN: "${AUTH_TOKEN:?AUTH_TOKEN must be set in .env}"
+      CLOAKBROWSER_AUTO_UPDATE: "false"
+
+    volumes:
+      - ./data:/data
+
+    # 保留原共享内存容量；这里只设置容量上限，不会预占 5 GiB。
+    shm_size: "5gb"
+    # 4 GiB 硬限制作为兜底；实际使用的共享内存也计入此限制。
+    mem_limit: "4g"
+    memswap_limit: "4g"
+    stop_grace_period: 45s
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/api/status', headers={'Authorization':'Bearer '+os.environ['AUTH_TOKEN']}), timeout=5)"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  memory-watchdog:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: "64m"
+
+    depends_on:
+      manager:
+        condition: service_started
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    entrypoint: ["python", "-u", "-c"]
+    command:
+      - |
+        import http.client
+        import json
+        import socket
+        import time
+
+        TARGET = "cloakbrowser-manager"
+        LIMIT = 3 * 1024 ** 3
+        INTERVAL = 15
+        COOLDOWN = 180
+
+        class DockerSocket(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(self.timeout)
+                self.sock.connect("/var/run/docker.sock")
+
+        def docker(method, path):
+            conn = DockerSocket("localhost", timeout=65)
+            try:
+                conn.request(method, path)
+                response = conn.getresponse()
+                body = response.read()
+                if response.status >= 300:
+                    raise RuntimeError(f"{method} {path}: HTTP {response.status}")
+                return json.loads(body) if body else None
+            finally:
+                conn.close()
+
+        print(f"watching {TARGET}; limit=3072 MiB; interval={INTERVAL}s; cooldown={COOLDOWN}s")
+        cooldown_until = 0.0
+        while True:
+            try:
+                if time.monotonic() >= cooldown_until:
+                    state = docker("GET", f"/containers/{TARGET}/json")
+                    # 不启动手动停止的容器，也不介入 Docker 正在执行的重启。
+                    if state["State"]["Running"] and not state["State"].get("Restarting", False):
+                        stats = docker("GET", f"/containers/{TARGET}/stats?stream=false&one-shot=true")
+                        memory = stats["memory_stats"]
+                        cache_stats = memory.get("stats", {})
+                        # cgroup v1 使用 total_inactive_file；v2 使用 inactive_file。
+                        cache = cache_stats.get("total_inactive_file", cache_stats.get("inactive_file", 0))
+                        raw_usage = int(memory["usage"])
+                        cache = int(cache)
+                        usage = raw_usage - cache if 0 <= cache < raw_usage else raw_usage
+                        if usage > LIMIT:
+                            print(f"memory={usage / 1024 ** 2:.1f} MiB > 3072 MiB; restarting {TARGET}")
+                            docker("POST", f"/containers/{TARGET}/restart?t=45")
+                            cooldown_until = time.monotonic() + COOLDOWN
+                            print(f"restart completed; cooldown={COOLDOWN}s")
+            except Exception as exc:
+                print(f"watchdog error: {type(exc).__name__}: {exc}")
+            time.sleep(INTERVAL)
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+networks:
+  cloak-net:
+    external: true

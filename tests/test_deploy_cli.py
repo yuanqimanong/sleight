@@ -7,6 +7,7 @@ CLI 的测法：把 ``_resolve`` 换成一个 :class:`FakeRunner`，然后断言
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -21,6 +22,15 @@ from .conftest import FakeRunner, docker_ok
 SPEC = DeploySpec(dir="/srv/cbm")
 STATUS = '{"running_count": 1, "binary_version": "146.0.7680.177.5", "profiles_total": 3}'
 RUNNING = (0, "running\thealthy\tcloakhq/cloakbrowser-manager:v0.0.10")
+
+
+def test_cli_resource_and_volume_options_are_applied():
+    args = cli.build_parser().parse_args(["deploy", "--mem-limit", "2gb", "--cpus", "1.5",
+                                         "--pids-limit", "256", "--max-running", "1",
+                                         "--resource-key", "shared-manager", "--data-volume", "shared-store"])
+    spec = cli._template_spec(args)
+    assert (spec.mem_limit, spec.cpus, spec.pids_limit, spec.max_running) == ("2gb", 1.5, 256, 1)
+    assert (spec.resource_key, spec.data_volume) == ("shared-manager", "shared-store")
 
 
 @pytest.fixture(autouse=True)
@@ -64,9 +74,60 @@ def test_home_follows_the_env_var(isolated_home):
     assert sleight_home() == isolated_home
 
 
+@pytest.mark.parametrize("value", [None, ""])
+def test_default_home_is_working_directory_data(tmp_path, monkeypatch, value):
+    monkeypatch.chdir(tmp_path)
+    if value is None:
+        monkeypatch.delenv("SLEIGHT_HOME")
+    else:
+        monkeypatch.setenv("SLEIGHT_HOME", value)
+    assert sleight_home() == tmp_path / "data"
+
+
+@pytest.mark.parametrize("system_token", ["", "from-system"])
+def test_ui_loads_current_directory_env_before_startup(tmp_path, monkeypatch, system_token):
+    from sleight.deploy import api
+
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    os.environ.pop("SLEIGHT_UI_TOKEN", None)
+    if system_token:
+        os.environ["SLEIGHT_UI_TOKEN"] = system_token
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text('SLEIGHT_UI_TOKEN="from-file"\n', encoding="utf-8")
+    observed = {}
+
+    def serve(**kwargs):
+        observed["token"] = os.environ.get("SLEIGHT_UI_TOKEN")
+        return 0
+
+    monkeypatch.setattr(api, "serve", serve)
+    assert cli.main(["ui"]) == 0
+    assert observed["token"] == (system_token or "from-file")
+
+
+def test_ui_does_not_load_parent_directory_env(tmp_path, monkeypatch):
+    from sleight.deploy import api
+
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    os.environ.pop("SLEIGHT_UI_TOKEN", None)
+    (tmp_path / ".env").write_text("SLEIGHT_UI_TOKEN=from-parent\n", encoding="utf-8")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    observed = {}
+
+    def serve(**kwargs):
+        observed["token"] = os.environ.get("SLEIGHT_UI_TOKEN")
+        return 0
+
+    monkeypatch.setattr(api, "serve", serve)
+    assert cli.main(["ui"]) == 0
+    assert observed["token"] is None
+
+
 def test_the_cli_and_the_store_agree_on_where_the_db_is():
     """CLI 每条命令都新开一个 Store，路径必须稳定，不然写进去的下一条命令读不到。"""
-    assert Store().path == sleight_home() / "sleight.db"
+    assert Store().path == sleight_home() / "control.db"
 
 
 # --------------------------------------------------------------------------- #
@@ -267,7 +328,7 @@ def test_purging_everything_in_one_go(capsys, target):
 def test_upgrade_swaps_the_image(capsys, target):
     cli.main(["deploy"])
     capsys.readouterr()
-    assert cli.main(["upgrade", "cloakhq/cloakbrowser-manager:v0.0.11", "--no-backup"]) == 0
+    assert cli.main(["upgrade", "cloakhq/cloakbrowser-manager:v0.0.11"]) == 0
     assert "MANAGER_IMAGE=cloakhq/cloakbrowser-manager:v0.0.11" in target.files["/srv/cbm/.env"]
 
 

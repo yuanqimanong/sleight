@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from typing import Any
 
-from .core.errors import Busy, LeaseStillHeld, NotFound, SleightError, TimeoutError
+from .core.errors import Busy, LeaseLost, LeaseStillHeld, NotFound, SleightError, TimeoutError
 from .core.session import Session
 from .core.transport import Transport
 from .core.types import InstanceInfo
@@ -648,19 +648,25 @@ class Pool:
 
         handle_lease = LeaseHandle(self._lease, key, token, self.ttl)
         provider = self._provider(info.provider)
+        handle = None
+        ready = False
         try:
+            # Cloak 冷启动可能超过 TTL；从拿到锁开始续期，不能等浏览器启动后再续。
+            handle = InstanceHandle(info, provider, handle_lease, strict=self.strict_close)
             provider.ensure_ready(info.id)
-            return InstanceHandle(info, provider, handle_lease, strict=self.strict_close)
+            if not handle_lease.renew():
+                raise LeaseLost(f"lease {key} was lost during browser startup")
+            ready = True
+            return handle
         except SleightError:
             log.warning("%s not ready, skipping", info.uid, exc_info=True)
-            handle_lease.release()
             return None
-        except BaseException:
-            # 任何**非** SleightError 也必须还锁。原来只兜 SleightError，于是一个
-            # provider 的 AttributeError / KeyboardInterrupt 就把租约搁置整整一个 TTL，
-            # 而且没有 InstanceHandle 存在、没人能释放它。
-            handle_lease.release()
-            raise
+        finally:
+            if not ready:
+                cleanup_errors = []
+                _swallow(cleanup_errors, handle.close if handle else handle_lease.release)
+                if cleanup_errors:
+                    log.warning("could not fully release failed startup %s: %s", key, cleanup_errors)
 
     # ------------------------------------------------------------------ #
     # 发现

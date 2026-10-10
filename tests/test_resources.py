@@ -16,6 +16,20 @@ from sleight.core.protocol import Event
 from sleight.core.resources import RESOURCE_TYPES, NetworkResource, ResourceTracker
 
 
+def test_capture_bound_rejects_growth_but_keeps_existing_updates():
+    from sleight.core.errors import Busy
+    tracker = ResourceTracker(max_resources=2)
+    tracker.feed(sent("one", "https://fixture.invalid/one"))
+    tracker.feed(sent("two", "https://fixture.invalid/two"))
+    with pytest.raises(Busy, match="limit"):
+        tracker.feed(sent("three", "https://fixture.invalid/three"))
+    tracker.feed(redirected("one", "https://fixture.invalid/redirect"))
+    tracker.feed(finished("one"))
+    assert len(tracker.snapshot()) == 2
+    assert tracker.snapshot()[0].finished
+    assert tracker.snapshot()[0].url.endswith("/redirect")
+
+
 def sent(request_id: str, url: str, *, type_: str | None = None, method: str = "GET") -> Event:
     params: dict = {"requestId": request_id, "request": {"url": url, "method": method}}
     if type_ is not None:

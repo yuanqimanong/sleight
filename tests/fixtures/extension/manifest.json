@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"Sleight integration probe","version":"1.0.0","content_scripts":[{"matches":["http://*/*"],"js":["probe.js"],"run_at":"document_end"}]}

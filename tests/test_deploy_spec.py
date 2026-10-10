@@ -166,7 +166,7 @@ def test_compose_has_the_things_that_matter():
     assert "container_name: cbm-01" in text
     assert '"${MANAGER_BIND_IP:-127.0.0.1}:${MANAGER_PORT:-9100}:8080"' in text
     assert 'shm_size: "8gb"' in text
-    assert "./data:/data" in text
+    assert "/srv/cloakbrowser-manager/data:/data" in text
     assert "soft: 65535" in text and "hard: 65535" in text
 
 
@@ -181,6 +181,7 @@ def test_healthcheck_targets_the_container_port():
     """健康检查在容器**内部**跑，所以是 8080 而不是宿主机端口。"""
     text = render_compose(DeploySpec(port=9100))
     assert "http://127.0.0.1:8080/api/status" in text
+    assert "os.environ['AUTH_TOKEN']" in text
     assert "http://127.0.0.1:9100/api/status" not in text
 
 

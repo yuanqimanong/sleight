@@ -24,12 +24,14 @@ from .core.errors import (
     LeaseLost,
     NotFound,
     NotReady,
+    ResponseTooLarge,
     SessionLost,
     SleightError,
     StaleRef,
 )
 from .core.extract import ExtractedDocument
 from .core.human import CAREFUL, DEFAULT, FAST, HumanProfile
+from .core.request import FetchResponse
 from .core.resources import NetworkResource
 from .core.session import Selectable, Session
 from .core.snapshot import BackendElement, Snapshot, SnapshotNode
@@ -74,6 +76,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "StaticElement",
     "ExtractedDocument",
     "NetworkResource",
+    "FetchResponse",
     "Transport",
     "enable_debug_logging",
     # 拟人预设
@@ -104,6 +107,7 @@ __all__ = [  # noqa: RUF022 - 按语义分组，不按字母序
     "InstanceError",
     "NotFound",
     "NotReady",
+    "ResponseTooLarge",
     "Busy",
     "Crashed",
     "SessionLost",

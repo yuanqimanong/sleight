@@ -45,17 +45,25 @@ SLEIGHT_BROWSER=fingerprint-chromium SLEIGHT_FINGERPRINT=42 sleight-mcp
 }
 ```
 
-### 四个工具
+### 五个工具
 
 | 工具 | action | 参数 |
 |---|---|---|
-| `browser_session` | `open` `reload` `back` `forward` `info` | `url` `wait_text` `wait_selector` `timeout` |
+| `browser_session` | `open` `reload` `back` `forward` `info` | `url` `referrer`（仅 open）`wait_text` `wait_selector` `timeout` |
 | `browser_observe` | `snapshot` `find` | `query` `role` `max_depth` |
 | `browser_act` | `click` `type` `press` `scroll` `hover` | `ref` **或** `coordinate` `text` `key` `dy` `human` |
 | `browser_extract` | — | `min_length` |
+| `browser_fetch` | `GET` `HEAD` | `url` `method` `timeout` `max_bytes` |
 
 **典型循环**：`observe(snapshot)` 拿到带 `[ref]` 的树 → 模型挑一个 → `act(click, ref=…)`。
 找不到就 `observe(find, query="提交")` 按文字定位。
+
+页面登录后，`browser_fetch` 可复用同一浏览器的 Cookie、代理和连接读取接口，不导航、不创建新实例。
+超时默认 30 秒（范围 0.1–120 秒），响应默认及硬上限为 256 KiB；超时或超限会取消读取。
+HTTP 403 等仍作为工具执行成功的响应返回，用 `http_ok` 和 `status` 判断 HTTP 结果。
+网络/CORS/CSP 错误走 `isError: true`，没有自动重试。该工具仍受浏览器的跨域与 Cookie 规则约束。
+`browser_session` 的可选 `referrer` 采用 strict-origin-when-cross-origin；不提供时沿用原导航行为。
+HTTP MCP 另提供 `browser_release`，用于结束会话和回收资源。
 
 **坐标逃生舱**：`browser_act` 既收 `ref` 也收 `coordinate: [x, y]`。Canvas、纯图标 UI
 这类 AX 树里没有可用节点的场景要靠它——只收 ref 的设计会在那里硬失败。
