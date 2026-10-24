@@ -1,0 +1,38 @@
+# 历史配置归档：下方正文保留原配置；不是当前可直接运行的部署方案。
+# Dockerfile、.env、数据卷或测试脚本已移除，旧command仅记录当时用途。
+name: sleight-eval-invisible-firefox
+services:
+  browser:
+    build:
+      context: .
+      args:
+        HTTP_PROXY: http://host.docker.internal:7890
+        HTTPS_PROXY: http://host.docker.internal:7890
+        NO_PROXY: localhost,127.0.0.1,host.docker.internal
+    image: sleight-eval-invisible-firefox:20261011
+    container_name: sleight-eval-invisible-firefox
+    command: ["python3", "/data/评测/shared/runner.py", "--project", "invisible-firefox"]
+    environment:
+      DISPLAY: :99
+      HTTP_PROXY: http://host.docker.internal:7890
+      HTTPS_PROXY: http://host.docker.internal:7890
+      NO_PROXY: localhost,127.0.0.1,host.docker.internal
+      TZ: UTC
+    ports:
+      - "127.0.0.1:19180:8080"
+      - "127.0.0.1:19181:6080"
+    volumes:
+      - "evaldata:/data/评测"
+      - "evaldata:/eval-data"
+    cpus: 8
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"
+    labels:
+      sleight.experiment: kernel-eval-20261011
+volumes:
+  evaldata:
+    external: true
+    name: sleight-eval-data-20261011

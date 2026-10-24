@@ -1,0 +1,22 @@
+# 归档参数模板：仅记录共用镜像；4CPU/4GiB为整理模板值，不证明每轮实际资源限额。
+# kc-browser 补测时候选与stock共用镜像配置记录
+# 浏览器版本：150.0.7871.47
+# 候选执行文件：/opt/browser/kc-browser-classic-v150.0.7871.47-linux-x64/kc-browser
+# stock执行文件：/opt/r3-stock/chrome-linux64/chrome
+# 镜像ID：sha256:29967c974eb4390361552468f808be8956eb2497cec96ec2897cb9bac12268aa
+# 镜像和所有补测文件已删除；需自行恢复镜像。本文件不执行测试。
+name: sleight-record-round3-kc-browser
+services:
+  browser:
+    image: "${BROWSER_IMAGE:-sleight-r3-pair-kc-browser:20261024}"
+    pull_policy: never
+    command: ["sleep", "infinity"]
+    environment:
+      DISPLAY: ":99"
+      TZ: UTC
+    cpus: 4
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"

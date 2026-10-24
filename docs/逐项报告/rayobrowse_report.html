@@ -1,0 +1,144 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rayobrowse 单轮测试报告</title><style>body{font:15px/1.7 system-ui;background:#f2f6fa;color:#173044;margin:0}main{max-width:1400px;padding:24px;margin:auto}section{background:white;padding:20px;border-radius:10px;margin:20px 0}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.cards div{background:white;padding:16px;border-radius:10px}b{font-size:28px;display:block}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}.scroll{overflow:auto}.notice{background:#fff4d4;padding:15px}input{padding:10px;width:80%;max-width:500px}a{color:#126a85}@media(max-width:700px){.cards{grid-template-columns:1fr 1fr}main{padding:10px}}main>p{overflow-wrap:anywhere}#native-screenshot-absence-revision{padding:16px;background:#fff4d4;overflow-wrap:anywhere}.native-screenshot-not-generated{overflow-wrap:anywhere}</style>
+<main><a href="../最终报告.html#item-C09">返回最终报告</a><p class="notice">历史报告，非本次重新实测。2026-10-24停止补测并删除原始截图、采样JSON、镜像和迁移备份；现有结果无法从本目录复核原始证据。下文“本次/当前”均指历史运行。PASS、FAIL等是旧判定标签，尚未完成判定器与同期对照复核；不得据此推定当前通用效果。</p>
+<h1>26、rayobrowse · 100页单轮＋5个独立实例</h1>
+<section id="native-screenshot-absence-revision"><h2>原生截图缺失的展示说明</h2>
+<p>本版本修正1处失效截图链接。相应原生结果未声明或生成截图，原JSON和错误原证当时保留，现已清理。未补造图片、未重新测试；网页判定、有效实例与失败/未知统计保持原报告值。本说明不将采集失败升级为通过或内核被识别。</p>
+</section>
+<p>COMPLETE_SINGLE_PASS_PROVISIONAL_RESULTS</p>
+<div class="cards"><div><b>100/100</b>历史结果记录</div><div><b>16/100</b>历史PASS标签／全部目标</div><div><b>73</b>未完成验收／观察标签</div><div><b>5/5</b>有效实例样本／计划5</div></div><p class="notice">暂定评价。HTTP200不等于反检测通过；未知不算成功或失败。100个目标条目已齐，未完成验收项见明细。无完整同期nodriver基准，不做精确排名。</p>
+<section><h2>独立实例内存</h2>
+<p>同seed2实例、异seed3实例，每实例1样本。Browser/SDK/PSS/RSS/cgroup分开；容器peak不等于Browser独占内存。</p>
+<div class="scroll"><table id="instances"><thead><tr><th>实例</th><th>组</th><th>seed</th><th>Browser PSS观测最大MiB</th><th>SDK/support PSS周期观测最大MiB</th><th>关闭后Browser PSS</th><th>释放</th></tr>
+</thead><tbody><tr><td>rayobrowse-instance-01</td><td>same_seed</td><td>2026101701</td><td>380.3</td><td>222.2</td><td>0.0</td><td>True</td></tr>
+<tr><td>rayobrowse-instance-02</td><td>same_seed</td><td>2026101701</td><td>382.7</td><td>221.6</td><td>0.0</td><td>True</td></tr>
+<tr><td>rayobrowse-instance-03</td><td>different_seed</td><td>2026101711</td><td>381.9</td><td>221.5</td><td>0.0</td><td>True</td></tr>
+<tr><td>rayobrowse-instance-04</td><td>different_seed</td><td>2026101712</td><td>380.2</td><td>222.0</td><td>0.0</td><td>True</td></tr>
+<tr><td>rayobrowse-instance-05</td><td>different_seed</td><td>2026101713</td><td>381.7</td><td>222.2</td><td>0.0</td><td>True</td></tr>
+</tbody></table></div><h2>指纹差异</h2>
+<table id="fingerprints"><thead><tr><th>字段</th><th>同seed2：不同值数</th><th>异seed3：不同值数</th></tr>
+</thead><tbody><tr><td>User-Agent</td><td>1</td><td>2</td></tr>
+<tr><td>Canvas RGBA像素</td><td>2</td><td>3</td></tr>
+<tr><td>Canvas PNG编码</td><td>2</td><td>3</td></tr>
+<tr><td>Audio</td><td>1</td><td>1</td></tr>
+<tr><td>字体向量</td><td>2</td><td>3</td></tr>
+<tr><td>WebGL renderer</td><td>1</td><td>1</td></tr>
+</tbody></table><p>PNG编码与RGBA像素分别解释；每实例1样本不能判断重复稳定性。</p>
+<ul><li>HTTP200仅代表访问，不等于反检测/验证码服务端通过。</li><li>每页只测一轮，不表示五轮稳定性。</li><li>同seed2实例、异seed3实例，每实例仅1次；不评估同实例重复稳定性。</li><li>固定本地指纹页面内存不代表任意业务页负载。</li><li>PSS/RSS为采样值；RSS汇总可能重复计算共享页，容器peak含SDK、显示服务和缓存。</li><li>没有同期完整nodriver基准，Δ未知，不输出精确选型排名。</li><li>五个短周期只能描述本次关闭释放，不能证明长期无泄漏。</li><li>不足5秒的实例周期采样可能没有运行时点；历史Browser内存值曾补用同一实例的原生绑定快照（原文件已清理）。SDK/support未在运行期间采到时保留未知，不能拿worker单独占用冒充完整SDK峰值。</li></ul></section>
+<section><h2>历史100目标明细</h2>
+<p>PASS_NO_CHALLENGE为旧判定标签；UNMEASURED包含未完成验收与仅观察项目。46项预设计分目标与54项观察目标不能混算成功率。</p>
+<input id="filter" placeholder="筛选ID、名称、结果或原因"><p id="count">显示100/100</p>
+<div class="scroll"><table id="pages"><thead><tr><th>ID</th><th>页面</th><th>结果</th><th>HTTP</th><th>秒</th><th>历史证据备注</th><th>原因</th></tr>
+</thead><tbody><tr><td>A01</td><td>Sannysoft AntiBot</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>11.76</td><td>—</td><td>page-native common automation cells and named Phantom/Selenium checks; Chromium-only capability/GPU heuristics observed separately</td></tr>
+<tr><td>A02</td><td>Infosimples Detect Headless</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>11.32</td><td>—</td><td>nine common tests; original broken-image async bug and browser-specific absence are observations</td></tr>
+<tr><td>A03</td><td>BrowserScan Bot Detection</td><td>FAIL</td><td>200</td><td>10.6</td><td>—</td><td>native Test Results headline and seventeen explicit status pairs; explanatory guide text is not a result</td></tr>
+<tr><td>A04</td><td>DeviceAndBrowserInfo Fingerprinting Bot Test</td><td>FAIL</td><td>200</td><td>12.98</td><td>—</td><td>native isBot boolean and completed raw detail schema; documentation mentions are excluded</td></tr>
+<tr><td>A05</td><td>Rebrowser Bot Detector</td><td>FAIL</td><td>200</td><td>10.81</td><td>—</td><td>native required item ratings and logged triggers; gray is incomplete</td></tr>
+<tr><td>A06</td><td>Fingerprint Scan</td><td>UNMEASURED</td><td>200</td><td>98.54</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>A07</td><td>CreepJS 原作者测试页</td><td>UNMEASURED</td><td>200</td><td>96.48</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>A08</td><td>Pixelscan Fingerprint Check</td><td>UNMEASURED</td><td>200</td><td>52.44</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>A09</td><td>Fingerprint Pro Playground</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>10.97</td><td>—</td><td>actual Bot table row agrees with current native Server API Response bot field and matched JS/server event identity; Visitor ID and examples cannot pass; other Smart Signals remain separately visible</td></tr>
+<tr><td>A10</td><td>BrowserScan Browser Checker</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>9.66</td><td>—</td><td>native completed capability-derived Chrome major, UA and non-grease Client Hints plus explicit match verdict; latest-version recommendation is not an error; unsupported family/range remains unknown</td></tr>
+<tr><td>B01</td><td>BrowserLeaks Canvas</td><td>UNMEASURED</td><td>200</td><td>11.52</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>B02</td><td>BrowserLeaks WebGL</td><td>UNMEASURED</td><td>200</td><td>10.64</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>B03</td><td>BrowserLeaks WebRTC</td><td>UNMEASURED</td><td>200</td><td>13.0</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>B04</td><td>BrowserLeaks TLS</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>11.02</td><td>—</td><td>native server-reported handshake/HTTP2 fields plus same-trial browser/server UA consistency; hashes are not forced equal to stock</td></tr>
+<tr><td>B05</td><td>BrowserLeaks HTTP/2</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>10.35</td><td>—</td><td>native server-reported handshake/HTTP2 fields plus same-trial browser/server UA consistency; hashes are not forced equal to stock</td></tr>
+<tr><td>B06</td><td>TrackMe TLS / HTTP Fingerprinting</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>10.78</td><td>—</td><td>native server UA paired with same-trial browser navigator UA; TLS hashes/protocol details remain observations</td></tr>
+<tr><td>C01</td><td>Incolumitas Bot / Behavior Tests</td><td>UNMEASURED</td><td>200</td><td>107.42</td><td>—</td><td>native updated behavioralClassificationScore after full form/confirm/basket/read task and &gt;=15 sec; ... and initial score are not success</td></tr>
+<tr><td>C02</td><td>DeviceAndBrowserInfo Behavioral Bot Test</td><td>FAIL</td><td>200</td><td>18.53</td><td>—</td><td>three page-native behavior/CDP mouse checks after submitted task; overlapping A04 fingerprint verdict is retained separately, not counted a second time</td></tr>
+<tr><td>C03</td><td>GeeTest 三代一键通过</td><td>CHALLENGE_REQUIRED</td><td>200</td><td>18.3</td><td>—</td><td>visible blocking challenge or validated active challenge region</td></tr>
+<tr><td>C04</td><td>GeeTest 三代滑动模式</td><td>CHALLENGE_REQUIRED</td><td>200</td><td>16.0</td><td>—</td><td>visible blocking challenge or validated active challenge region</td></tr>
+<tr><td>C05</td><td>GeeTest 四代 Demo</td><td>UNMEASURED</td><td>200</td><td>138.54</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>C06</td><td>数美智能验证码体验</td><td>UNMEASURED</td><td>200</td><td>130.95</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>C07</td><td>V5 智能验证 Demo</td><td>UNMEASURED</td><td>200</td><td>136.72</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>C08</td><td>Luosimao 人机验证 Demo</td><td>UNMEASURED</td><td>200</td><td>143.01</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>C09</td><td>Google reCAPTCHA v2 Demo</td><td>CHALLENGE_REQUIRED</td><td>200</td><td>13.58</td><td>—</td><td>visible blocking challenge or validated active challenge region</td></tr>
+<tr><td>C10</td><td>Google reCAPTCHA v3 Request Scores</td><td>FRONTEND_ONLY</td><td>200</td><td>127.91</td><td>—</td><td>frontend/token evidence without adequate production server acceptance</td></tr>
+<tr><td>C11</td><td>hCaptcha 官方 Demo</td><td>UNMEASURED</td><td>200</td><td>134.65</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>C12</td><td>Turnstile Managed 实际测试页</td><td>FRONTEND_ONLY</td><td>200</td><td>135.28</td><td>—</td><td>frontend/token evidence without adequate production server acceptance</td></tr>
+<tr><td>C13</td><td>Turnstile Invisible 实际测试页</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>18.53</td><td>—</td><td>frontend completed and browser-origin server validation accepted under validated non-dummy mode</td></tr>
+<tr><td>D01</td><td>ScrapingCourse AntiBot Challenge</td><td>UNMEASURED</td><td>403</td><td>29.94</td><td><span class="native-screenshot-not-generated">截图未生成（原生结果未声明截图）</span> / </td><td>No complete interpretable native acceptance result; do not infer bot detection from transport failure</td></tr>
+<tr><td>E031</td><td>My IP Address - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>12.23</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E032</td><td>JavaScript Browser Information - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>13.39</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E033</td><td>Font Fingerprinting - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>13.37</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E034</td><td>Features Detection - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>10.8</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E035</td><td>Content Filters and Proxy Detection - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>52.32</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E036</td><td>QUIC Client Test - QUIC+HTTP/3 Fingerprinting - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>12.16</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E037</td><td>TCP/IP Passive Fingerprinting - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>10.53</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E038</td><td>Chrome Extension Detection - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>57.96</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E039</td><td>WebGPU Browser Report - WebGPU Fingerprinting - WebGPU Test - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>53.28</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E040</td><td>Client Hints - BrowserLeaks</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>11.34</td><td>—</td><td>native JS and server UA-CH platform/mobile/version fields agree; grease brands and order are not identity assertions</td></tr>
+<tr><td>E041</td><td>DNS Leak Test - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>97.28</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E042</td><td>CSS Media Queries - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>10.79</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E043</td><td>ClientRects Fingerprinting - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>11.78</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E044</td><td>Do Not Track &amp; Global Privacy Control - BrowserLeaks</td><td>UNMEASURED</td><td>200</td><td>10.46</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E045</td><td>Workers | CreepJS</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>10.41</td><td>—</td><td>page-native selected identity fields across predeclared Window/Worker contexts; canvas, GPU, timing and full hash excluded</td></tr>
+<tr><td>E046</td><td>&lt;iframe&gt; | CreepJS</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>9.8</td><td>—</td><td>native iframe table identity/capability fields in seven live contexts; dead-frame absence and canvas hash are not forced equal</td></tr>
+<tr><td>E047</td><td>Fonts | CreepJS</td><td>UNMEASURED</td><td>200</td><td>55.04</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E048</td><td>Timezone | CreepJS</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>10.16</td><td>—</td><td>native Date/Intl timezone and offset agree and match declared config persona; expected persona is required for full acceptance</td></tr>
+<tr><td>E049</td><td>Window | CreepJS</td><td>UNMEASURED</td><td>200</td><td>55.56</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E050</td><td>Screen | CreepJS</td><td>FAIL</td><td>200</td><td>13.67</td><td>—</td><td>page-native CSS/JS/DOM/visualViewport geometry relations; 2 CSS px tolerance accounts for frame/rounding differences, browser chrome height may differ</td></tr>
+<tr><td>E051</td><td>Prototype | CreepJS</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>17.34</td><td>—</td><td>native prototype search finished; zero without positive search count is not success</td></tr>
+<tr><td>E052</td><td>DOMRect | CreepJS</td><td>UNMEASURED</td><td>200</td><td>52.59</td><td>—</td><td>page-native dimensions/matrix/unshift checks and independently recalculated rectangle identities; score/hash alone not sufficient</td></tr>
+<tr><td>E053</td><td>Emojis | CreepJS</td><td>UNMEASURED</td><td>200</td><td>11.05</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E054</td><td>Math | CreepJS</td><td>UNMEASURED</td><td>200</td><td>9.95</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E055</td><td>Machine | CreepJS</td><td>FAIL</td><td>200</td><td>9.96</td><td>—</td><td>page-native Machine identity checks and declared persona platform/OS; unknown voice support is observed</td></tr>
+<tr><td>E056</td><td>Extensions | CreepJS</td><td>UNMEASURED</td><td>200</td><td>14.58</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E057</td><td>JS Proxy | CreepJS</td><td>UNMEASURED</td><td>200</td><td>10.71</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E058</td><td>BrowserScan 综合指纹检测</td><td>UNMEASURED</td><td>200</td><td>52.05</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E059</td><td>HTTP2/SSL/TLS Fingerprint Detection | BrowserScan</td><td>UNMEASURED</td><td>200</td><td>10.39</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E060</td><td>Client Hints | BrowserScan</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>11.34</td><td>—</td><td>native JS and server UA-CH platform/mobile/version fields agree; grease brands and order are not identity assertions</td></tr>
+<tr><td>E061</td><td>Canvas Fingerprint | BrowserScan</td><td>UNMEASURED</td><td>200</td><td>52.48</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E062</td><td>WebGPU Browser Report - WebGPU Fingerprinting - WebGPU Test - BrowserScan | BrowserScan</td><td>UNMEASURED</td><td>200</td><td>51.9</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E063</td><td>What is my timezone | BrowserScan</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>9.78</td><td>—</td><td>native Date and Intl timezone/offset consistency against config persona; IP geolocation timezone is intentionally a separate observation</td></tr>
+<tr><td>E064</td><td>Media Devices | BrowserScan</td><td>UNMEASURED</td><td>200</td><td>13.0</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E065</td><td>What is my Timezone :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>51.41</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E066</td><td>What is my Network Information :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>53.13</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E067</td><td>What is my Screen Size :: WebBrowserTools</td><td>FAIL</td><td>200</td><td>11.4</td><td>—</td><td>page-native screen/available/window/viewport/DPR relationships; scrollbar/body document height not forced equal to viewport</td></tr>
+<tr><td>E068</td><td>Detect Canvas Fingerprint :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>11.04</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E069</td><td>Detect WebGL Fingerprint :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>11.81</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E070</td><td>Detect WebGPU Fingerprint :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>53.87</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E071</td><td>Test WebRTC Leak :: WebBrowserTools</td><td>UNMEASURED</td><td>200</td><td>54.69</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E072</td><td>Browserize — Feature Detection能力矩阵</td><td>UNMEASURED</td><td>200</td><td>14.08</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E073</td><td>Browserize — CSS能力指纹</td><td>UNMEASURED</td><td>200</td><td>12.98</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E074</td><td>Browserize — Math Routines数学函数</td><td>UNMEASURED</td><td>200</td><td>12.42</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E075</td><td>Browserize — Canvas渲染</td><td>UNMEASURED</td><td>200</td><td>13.47</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E076</td><td>Browserize — Error Messages堆栈与错误</td><td>UNMEASURED</td><td>200</td><td>54.55</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E077</td><td>Browserize — AudioContext音频</td><td>UNMEASURED</td><td>200</td><td>56.26</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E078</td><td>Browserize — Canvas Fonts字体枚举</td><td>UNMEASURED</td><td>200</td><td>13.16</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E079</td><td>Browserize — WebGL渲染与属性</td><td>UNMEASURED</td><td>200</td><td>13.37</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E080</td><td>Browserize — getClientRects几何特征</td><td>PASS_NO_CHALLENGE</td><td>200</td><td>12.11</td><td>—</td><td>ten native LRZ ClientRects readouts and recalculated geometry identities; full hash equality/uniqueness is not a pass condition</td></tr>
+<tr><td>E081</td><td>Browserize — canPlayType编解码能力</td><td>UNMEASURED</td><td>200</td><td>14.94</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E082</td><td>Browserize — MathML排版</td><td>UNMEASURED</td><td>200</td><td>13.04</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E083</td><td>Browserize — Emoji几何特征</td><td>UNMEASURED</td><td>200</td><td>55.01</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E084</td><td>Browserize — Header Signature请求头</td><td>UNMEASURED</td><td>200</td><td>11.89</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E085</td><td>Browserize — ETag重复访问跟踪</td><td>UNMEASURED</td><td>200</td><td>54.5</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E086</td><td>Browserize — HTTP2帧与顺序</td><td>UNMEASURED</td><td>200</td><td>56.79</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E087</td><td>Browserize — JSEcho对象与原型</td><td>UNMEASURED</td><td>200</td><td>54.31</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E088</td><td>Browserize — 无JS CSS字体检测</td><td>UNMEASURED</td><td>200</td><td>63.57</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E089</td><td>FingerprintJS 开源 Demo</td><td>UNMEASURED</td><td>200</td><td>11.33</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E090</td><td>AmIUnique</td><td>UNMEASURED</td><td>200</td><td>13.7</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E091</td><td>EFF Cover Your Tracks</td><td>UNMEASURED</td><td>200</td><td>97.14</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E092</td><td>FPDetector</td><td>UNMEASURED</td><td>200</td><td>54.91</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E093</td><td>GLASSBOX</td><td>UNMEASURED</td><td>200</td><td>10.98</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E094</td><td>Tembrica 指纹测试</td><td>UNMEASURED</td><td>200</td><td>54.71</td><td>—</td><td>requires page-specific live validation; raw output was captured historically; files have since been removed</td></tr>
+<tr><td>E095</td><td>Browser Check 指纹测试</td><td>UNMEASURED</td><td>200</td><td>10.86</td><td>—</td><td>page-specific native result fields collected as observations; no bot pass, no score from hash/uniqueness/zero count</td></tr>
+<tr><td>E096</td><td>Fingerprint Scan 行为测试</td><td>FAIL</td><td>200</td><td>20.42</td><td>—</td><td>native completed behavior replay and specific Behaviour risk; does not score overall fingerprint/hardware risk a second time</td></tr>
+<tr><td>E097</td><td>Friendly Captcha Playground</td><td>FRONTEND_ONLY</td><td>200</td><td>136.58</td><td>—</td><td>frontend/token evidence without adequate production server acceptance</td></tr>
+<tr><td>E098</td><td>Prosopo Frictionless</td><td>UNMEASURED</td><td>200</td><td>127.56</td><td>—</td><td>fixed original configuration not verified by exact native control fields; native result retained as non-scoring evidence</td></tr>
+<tr><td>E099</td><td>Prosopo Image</td><td>UNMEASURED</td><td>200</td><td>133.09</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+<tr><td>E100</td><td>Prosopo Puzzle</td><td>UNMEASURED</td><td>200</td><td>135.03</td><td>—</td><td>widget incomplete or unclassified; no solved challenge presumed</td></tr>
+</tbody></table></div></section>
+<script>document.querySelector('#filter').addEventListener('input',e=>{let n=0;for(let r of document.querySelectorAll('#pages tbody tr')){r.hidden=!r.textContent.toLowerCase().includes(e.target.value.toLowerCase());if(!r.hidden)n++}document.querySelector('#count').textContent='显示'+n+'/100'})</script><section id="group-delivery"><h2>关闭释放与内存趋势核查</h2>
+<p>100次正式网页与5个独立实例已执行。关闭后Browser PSS均为0，支持进程和临时profile清空；本项容器已停止。</p>
+<p>逐页关闭后的cgroup内存首尾变化约-896.3 MiB；它还包含显示服务、仍在退出的worker、文件缓存等，不是浏览器独占内存。</p>
+<p>新增memory.stat只覆盖采样实际存在的时段；缺失的历史匿名内存/文件缓存不回填。不同网页和5个短周期不能证明长期泄漏或无泄漏。</p>
+<p>Browser PSS为观测最大值，不是连续峰值；未采到的SDK运行期内存保持未知。每实例仅1次指纹样本，不评价同实例重复稳定性。</p>
+<p>原100页中46项有预设验收标准，54项仅作观察、不计分；未知不并入成功，网页可打开不等于通过。</p>
+<p>HTTP200不等于反检测验收通过。失败、未知和授权受限保留；无同期完整nodriver基准，不强排精确名次。</p>
+<p>本配置调度上限5个测试容器，实际并发受资源及域名/provider锁限制；未恢复定时任务。</p>
+<p>同一配置存在不同并发阶段；原证已清理，不跨阶段比较耗时或内存名次。</p>
+<p>本项包含Windows宿主重启后的新VM阶段；新VM的OOM0不是跨VM连续证据，采样内存与耗时不作跨阶段精确排名。</p>
+<p>本项有100个网页在已登记的外部数据库共存阶段执行；数据库仅观察，额外资源已预留。实际并发与资源阶段不同，耗时和内存不作跨阶段精确排名；网页分母仍100，原生参数和验收未改。</p>
+</section>
+</main></html>
