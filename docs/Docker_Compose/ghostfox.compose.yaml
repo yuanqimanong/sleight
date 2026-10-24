@@ -1,0 +1,24 @@
+# 归档参数模板：镜像身份来自历史记录；资源项为后整理的统一示例，不是逐轮配置复刻。
+# ghostfox / Ghostfox Ghostfox 152.0.4-beta.30
+# 来源：历史实际配置；image ID: sha256:6edb1d78ee079e2f653729cd6d895ff5d986d9a71765435f2c869f3f340bbedc
+# 上游：https://github.com/autokeren/ghostfox
+# 驱动：camoufox-sdk；下方为仅保留镜像身份的空闲容器模板。
+# 本地自建镜像及构建源码已按要求删除。需先取得镜像或通过 BROWSER_IMAGE 指定替代镜像。
+# 此文件只保留容器配置；不包含或启动历史测试任务。不能单凭此文件重建原环境。
+name: sleight-record-ghostfox
+services:
+  browser:
+    image: "${BROWSER_IMAGE:-sleight-eval-ghostfox:20261016}"
+    pull_policy: never
+    command: ["sleep", "infinity"]
+    environment:
+      DISPLAY: ":99"
+      TZ: UTC
+    cpus: 4
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"
+    labels:
+      sleight.project: browser-kernel-research

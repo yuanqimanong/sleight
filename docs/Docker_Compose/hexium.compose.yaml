@@ -1,0 +1,24 @@
+# 归档参数模板：镜像身份来自历史记录；资源项为后整理的统一示例，不是逐轮配置复刻。
+# hexium / Hexium 151.0.7922.174
+# 来源：历史实际配置；image ID: sha256:04362c064bfdb598f92c1d94ee40a83b425ab6b000449c10507064e068afc833
+# 上游：https://github.com/HeadlessXLabs/hexium-browser
+# 驱动：历史锁定驱动；详见配置 JSON；下方为仅保留镜像身份的空闲容器模板。
+# 本地自建镜像及构建源码已按要求删除。需先取得镜像或通过 BROWSER_IMAGE 指定替代镜像。
+# 此文件只保留容器配置；不包含或启动历史测试任务。不能单凭此文件重建原环境。
+name: sleight-record-hexium
+services:
+  browser:
+    image: "${BROWSER_IMAGE:-sleight-eval-hexium:20261017}"
+    pull_policy: never
+    command: ["sleep", "infinity"]
+    environment:
+      DISPLAY: ":99"
+      TZ: UTC
+    cpus: 4
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"
+    labels:
+      sleight.project: browser-kernel-research

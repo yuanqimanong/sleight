@@ -1,0 +1,24 @@
+# 归档参数模板：镜像身份来自历史记录；资源项为后整理的统一示例，不是逐轮配置复刻。
+# ruyipage / Mozilla Firefox 155.0
+# 来源：历史实际配置；image ID: sha256:beb352467d06b1601cbe7b6d90f98bd664b7d2d9823aba723dfa1f414ef654ea
+# 上游：https://github.com/LoseNine/ruyipage
+# 驱动：ruyipage；下方为仅保留镜像身份的空闲容器模板。
+# 本地自建镜像及构建源码已按要求删除。需先取得镜像或通过 BROWSER_IMAGE 指定替代镜像。
+# 此文件只保留容器配置；不包含或启动历史测试任务。不能单凭此文件重建原环境。
+name: sleight-record-ruyipage
+services:
+  browser:
+    image: "${BROWSER_IMAGE:-sleight-eval-ruyipage:20261011}"
+    pull_policy: never
+    command: ["sleep", "infinity"]
+    environment:
+      DISPLAY: ":99"
+      TZ: UTC
+    cpus: 4
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"
+    labels:
+      sleight.project: browser-kernel-research

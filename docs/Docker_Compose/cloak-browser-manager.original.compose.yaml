@@ -1,0 +1,41 @@
+# 历史配置归档：下方正文保留原配置；不是当前可直接运行的部署方案。
+# Dockerfile、.env、数据卷或测试脚本已移除，旧command仅记录当时用途。
+name: sleight-cloak-ab-20261011
+services:
+  v009:
+    image: cloakhq/cloakbrowser-manager:v0.0.9@sha256:0e02a0e479ca9ac8b031ea10d504e0c5203a1326d15f57b1588f72cb590f44e8
+    container_name: sleight-cloak-ab-20261011-v009
+    init: true
+    env_file: .env
+    ports: ["127.0.0.1:19009:8080"]
+    volumes: ["v009-data:/data"]
+    mem_limit: 2500m
+    memswap_limit: 2500m
+    cpus: 2
+    pids_limit: 512
+    shm_size: 768m
+    restart: "no"
+    labels:
+      sleight.experiment: cloak-ab-20261011
+  v016:
+    image: cloakhq/cloakbrowser-manager:v0.1.6@sha256:6c8f1c6bf53bb82f09f7d8b9cde30fb8b80a10fc32d15889ff2a1c7143156f01
+    container_name: sleight-cloak-ab-20261011-v016
+    init: true
+    env_file: .env
+    ports: ["127.0.0.1:19016:8080"]
+    volumes: ["v016-data:/data"]
+    mem_limit: 2500m
+    memswap_limit: 2500m
+    cpus: 2
+    pids_limit: 512
+    shm_size: 768m
+    restart: "no"
+    labels:
+      sleight.experiment: cloak-ab-20261011
+volumes:
+  v009-data:
+    labels:
+      sleight.experiment: cloak-ab-20261011
+  v016-data:
+    labels:
+      sleight.experiment: cloak-ab-20261011

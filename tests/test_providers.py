@@ -17,7 +17,7 @@ import io
 import json
 import urllib.error
 import urllib.request
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -771,6 +771,14 @@ def test_prune_filters_are_and_not_or(monkeypatch: pytest.MonkeyPatch):
 
 def test_prune_older_than_skips_profiles_with_no_timestamp(monkeypatch: pytest.MonkeyPatch):
     """读不出建立时间就不删 —— 批量删除里"看不懂就不动"是唯一安全的默认值。"""
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 7, tzinfo=UTC)
+            return fixed.astimezone(tz) if tz is not None else fixed.replace(tzinfo=None)
+
+    # FLEET 的“新旧”相对于这个时点，不能随 CI 实际执行日期改变。
+    monkeypatch.setattr("sleight.providers.cloakbrowser.datetime", FixedDatetime)
     mgr, _ = fleet_manager(monkeypatch)
     names = {p["name"] for p in mgr.prune_profiles(
         name_prefix="", older_than=timedelta(days=30)

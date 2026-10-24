@@ -1,0 +1,24 @@
+# 归档参数模板：镜像身份来自历史记录；资源项为后整理的统一示例，不是逐轮配置复刻。
+# invisible-firefox / Mozilla Firefox 151.0
+# 来源：历史实际配置；image ID: sha256:b86ace8055250cfc5e4c69918ec9d1ed1d74f7391e473234203236ab35a2efc0
+# 上游：https://github.com/feder-cr/firefox_antidetect_patch
+# 驱动：invisible；下方为仅保留镜像身份的空闲容器模板。
+# 本地自建镜像及构建源码已按要求删除。需先取得镜像或通过 BROWSER_IMAGE 指定替代镜像。
+# 此文件只保留容器配置；不包含或启动历史测试任务。不能单凭此文件重建原环境。
+name: sleight-record-invisible-firefox
+services:
+  browser:
+    image: "${BROWSER_IMAGE:-sleight-eval-invisible-firefox:20261011}"
+    pull_policy: never
+    command: ["sleep", "infinity"]
+    environment:
+      DISPLAY: ":99"
+      TZ: UTC
+    cpus: 4
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    pids_limit: 2048
+    restart: "no"
+    labels:
+      sleight.project: browser-kernel-research

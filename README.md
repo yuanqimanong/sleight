@@ -8,6 +8,8 @@ Python ≥ 3.11 · one runtime dependency (`websocket-client`) · MIT
 
 **[中文 README](README-zh.md)** · 📖 **[Wiki — full documentation](https://github.com/yuanqimanong/sleight/wiki)**
 
+[Browser-engine research archive](docs/最终报告.html) — Chinese HTML report; download and open locally. Historical observations and selection priorities, not a verified effectiveness ranking.
+
 ```bash
 pip install sleight                     # core: one dependency
 pip install "sleight[xpath]"            # + lxml, for parse(xpath=True)

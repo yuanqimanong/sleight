@@ -7,6 +7,8 @@ Python ≥ 3.11 · 唯一运行依赖（`websocket-client`）· MIT
 
 **[English README](README.md)** · 📖 **[Wiki — 完整中文文档](https://github.com/yuanqimanong/sleight/wiki)**
 
+[浏览器内核基座调研](docs/最终报告.html)（HTML，下载后本地打开）：保留历史观察与选型优先级，不代表已验证的效果排名。
+
 ```bash
 pip install sleight                     # 核心：一个依赖
 pip install "sleight[xpath]"            # + lxml，解锁 parse(xpath=True)

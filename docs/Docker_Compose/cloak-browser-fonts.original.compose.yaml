@@ -1,0 +1,8 @@
+# 历史配置归档：下方正文保留原配置；不是当前可直接运行的部署方案。
+# Dockerfile、.env、数据卷或测试脚本已移除，旧command仅记录当时用途。
+# 此文件是覆盖片段，依赖当时主Compose中的v016服务；字体和镜像未随文档发布。
+# Local-only font image; keep original profile data volumes.
+# The font files came from this Windows installation and must not be published.
+services:
+  v016:
+    image: sleight-cloak-ab-20261011:v016-fonts
